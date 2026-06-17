@@ -7,6 +7,14 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AA000001000000000000AAA2 /* BackgroundDownloadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000AAA1 /* BackgroundDownloadManager.swift */; };
+		AA000001000000000000AAA4 /* LiveActivityBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000AAA3 /* LiveActivityBridge.swift */; };
+		AA000001000000000000AAA6 /* DownloadActivityAttributes.swift (Runner) in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000AAA5 /* DownloadActivityAttributes.swift */; };
+		BB000001000000000000BBBB /* GopeedDownloadWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BBBA /* GopeedDownloadWidget.swift */; };
+		BB000001000000000000BBBD /* GopeedWidgetsBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BBBC /* GopeedWidgetsBundle.swift */; };
+		BB000001000000000000BBBF /* DownloadActivityAttributes.swift (GopeedWidgets) in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BBBE /* DownloadActivityAttributes.swift */; };
+		CC000001000000000000CCC5 /* GopeedWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BBB2 /* GopeedWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+
 		0C585CBA2D41E28900FF2EC0 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C585CB92D41E28900FF2EC0 /* ShareViewController.swift */; };
 		0C585CBD2D41E28900FF2EC0 /* Base in Resources */ = {isa = PBXBuildFile; fileRef = 0C585CBC2D41E28900FF2EC0 /* Base */; };
 		0C585CC12D41E28900FF2EC0 /* ShareExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 0C585CB72D41E28900FF2EC0 /* ShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -24,6 +32,14 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		BB000001000000000000BBB4 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 97C146E61CF9000F007C117D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = BB000001000000000000BBB3;
+			remoteInfo = GopeedWidgets;
+		};
+
 		0C585CBF2D41E28900FF2EC0 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 97C146E61CF9000F007C117D /* Project object */;
@@ -41,6 +57,7 @@
 			dstSubfolderSpec = 13;
 			files = (
 				0C585CC12D41E28900FF2EC0 /* ShareExtension.appex in Embed Foundation Extensions */,
+				CC000001000000000000CCC5 /* GopeedWidgets.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -59,6 +76,15 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		AA000001000000000000AAA1 /* BackgroundDownloadManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = BackgroundDownloadManager.swift; sourceTree = "<group>"; };
+		AA000001000000000000AAA3 /* LiveActivityBridge.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = LiveActivityBridge.swift; sourceTree = "<group>"; };
+		AA000001000000000000AAA5 /* DownloadActivityAttributes.swift (Runner) */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; name = DownloadActivityAttributes.swift; path = Shared/DownloadActivityAttributes.swift; sourceTree = "<group>"; };
+		BB000001000000000000BBB2 /* GopeedWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = GopeedWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		BB000001000000000000BBBA /* GopeedDownloadWidget.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = GopeedDownloadWidget.swift; sourceTree = "<group>"; };
+		BB000001000000000000BBBC /* GopeedWidgetsBundle.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = GopeedWidgetsBundle.swift; sourceTree = "<group>"; };
+		BB000001000000000000BBBE /* DownloadActivityAttributes.swift (GopeedWidgets) */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; name = DownloadActivityAttributes.swift; path = ../Shared/DownloadActivityAttributes.swift; sourceTree = "<group>"; };
+		BB000001000000000000BBB0 /* GopeedWidgets/Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+
 		029EF293EAA92EB3D18BBF19 /* libresolv.tbd */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libresolv.tbd; path = usr/lib/libresolv.tbd; sourceTree = "<group>"; };
 		0C585CB72D41E28900FF2EC0 /* ShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		0C585CB92D41E28900FF2EC0 /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
@@ -109,6 +135,18 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		BB000001000000000000BBB1 /* GopeedWidgets */ = {
+			isa = PBXGroup;
+			children = (
+				BB000001000000000000BBBA /* GopeedDownloadWidget.swift */,
+				BB000001000000000000BBBC /* GopeedWidgetsBundle.swift */,
+				BB000001000000000000BBBE /* DownloadActivityAttributes.swift */,
+				BB000001000000000000BBB0 /* Info.plist */,
+			);
+			path = GopeedWidgets;
+			sourceTree = "<group>";
+		};
+
 		0C585CB82D41E28900FF2EC0 /* ShareExtension */ = {
 			isa = PBXGroup;
 			children = (
@@ -138,6 +176,7 @@
 				97C146F01CF9000F007C117D /* Runner */,
 				0C585CB82D41E28900FF2EC0 /* ShareExtension */,
 				97C146EF1CF9000F007C117D /* Products */,
+				BB000001000000000000BBB1 /* GopeedWidgets */,
 				ADF7F433B4BC23D6C18AB78B /* Pods */,
 				B4A1CBAC5AA50208793CFF34 /* Frameworks */,
 			);
@@ -148,6 +187,7 @@
 			children = (
 				97C146EE1CF9000F007C117D /* Runner.app */,
 				0C585CB72D41E28900FF2EC0 /* ShareExtension.appex */,
+				BB000001000000000000BBB2 /* GopeedWidgets.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -164,6 +204,9 @@
 				1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */,
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
+				AA000001000000000000AAA1 /* BackgroundDownloadManager.swift */,
+				AA000001000000000000AAA3 /* LiveActivityBridge.swift */,
+				AA000001000000000000AAA5 /* DownloadActivityAttributes.swift */,
 			);
 			path = Runner;
 			sourceTree = "<group>";
@@ -192,6 +235,24 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		BB000001000000000000BBB3 /* GopeedWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CC000001000000000000CCC1 /* Build configuration list for PBXNativeTarget "GopeedWidgets" */;
+			buildPhases = (
+				BB000001000000000000BBB6 /* Sources */,
+				BB000001000000000000BBB7 /* Frameworks */,
+				BB000001000000000000BBB8 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = GopeedWidgets;
+			productName = GopeedWidgets;
+			productReference = BB000001000000000000BBB2 /* GopeedWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+
 		0C585CB62D41E28900FF2EC0 /* ShareExtension */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 0C585CC62D41E28900FF2EC0 /* Build configuration list for PBXNativeTarget "ShareExtension" */;
@@ -227,6 +288,7 @@
 			);
 			dependencies = (
 				0C585CC02D41E28900FF2EC0 /* PBXTargetDependency */,
+				BB000001000000000000BBB5 /* PBXTargetDependency */,
 			);
 			name = Runner;
 			productName = Runner;
@@ -244,6 +306,9 @@
 				ORGANIZATIONNAME = "";
 				TargetAttributes = {
 					0C585CB62D41E28900FF2EC0 = {
+						CreatedOnToolsVersion = 15.4;
+					};
+					BB000001000000000000BBB3 = {
 						CreatedOnToolsVersion = 15.4;
 					};
 					97C146ED1CF9000F007C117D = {
@@ -267,6 +332,7 @@
 			targets = (
 				97C146ED1CF9000F007C117D /* Runner */,
 				0C585CB62D41E28900FF2EC0 /* ShareExtension */,
+				BB000001000000000000BBB3 /* GopeedWidgets */,
 			);
 		};
 /* End PBXProject section */
@@ -367,6 +433,31 @@
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		BB000001000000000000BBB6 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BB000001000000000000BBBB /* GopeedDownloadWidget.swift in Sources */,
+				BB000001000000000000BBBD /* GopeedWidgetsBundle.swift in Sources */,
+				BB000001000000000000BBBF /* DownloadActivityAttributes.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BB000001000000000000BBB7 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BB000001000000000000BBB8 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+
 		0C585CB32D41E28900FF2EC0 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -380,6 +471,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
+				AA000001000000000000AAA2 /* BackgroundDownloadManager.swift in Sources */,
+				AA000001000000000000AAA4 /* LiveActivityBridge.swift in Sources */,
+				AA000001000000000000AAA6 /* DownloadActivityAttributes.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -387,6 +481,12 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		BB000001000000000000BBB5 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = BB000001000000000000BBB3 /* GopeedWidgets */;
+			targetProxy = BB000001000000000000BBB4 /* PBXContainerItemProxy */;
+		};
+
 		0C585CC02D41E28900FF2EC0 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 0C585CB62D41E28900FF2EC0 /* ShareExtension */;
@@ -422,6 +522,83 @@
 /* End PBXVariantGroup section */
 
 /* Begin XCBuildConfiguration section */
+		CC000001000000000000CCC2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = JH48DS925K;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = GopeedWidgets/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.gopeed.gopeed.GopeedWidgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+			};
+			name = Debug;
+		};
+		CC000001000000000000CCC3 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = JH48DS925K;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = GopeedWidgets/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.gopeed.gopeed.GopeedWidgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				MTL_FAST_MATH = YES;
+			};
+			name = Release;
+		};
+		CC000001000000000000CCC4 /* Profile */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = JH48DS925K;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = GopeedWidgets/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.gopeed.gopeed.GopeedWidgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				MTL_FAST_MATH = YES;
+			};
+			name = Profile;
+		};
+
 		0C585CC32D41E28900FF2EC0 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -772,6 +949,17 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		CC000001000000000000CCC1 /* Build configuration list for PBXNativeTarget "GopeedWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC000001000000000000CCC2 /* Debug */,
+				CC000001000000000000CCC3 /* Release */,
+				CC000001000000000000CCC4 /* Profile */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+
 		0C585CC62D41E28900FF2EC0 /* Build configuration list for PBXNativeTarget "ShareExtension" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
