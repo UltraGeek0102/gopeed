@@ -1,0 +1,133 @@
+name: iOS Background Download
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      # Trigger only when iOS-related files change
+      - 'ui/flutter/ios/**'
+      - 'ui/flutter/lib/**'
+      - 'ui/flutter/pubspec.yaml'
+      - 'bind/mobile/**'
+      - '.github/workflows/ios-background.yml'
+      - 'scripts/patch_pbxproj.py'
+  workflow_dispatch:
+    inputs:
+      skip_gomobile:
+        description: 'Skip gomobile build (use cached xcframework)'
+        required: false
+        default: 'false'
+
+env:
+  GO_VERSION: '1.25'
+  FLUTTER_VERSION: '3.41.6'
+
+jobs:
+  build-ios:
+    runs-on: macos-14          # Apple Silicon, Xcode 15+
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Xcode version ─────────────────────────────────────────────────────
+      - name: Select Xcode 16
+        run: |
+          # Use latest available Xcode on the runner
+          XCODE=$(ls /Applications | grep Xcode | sort -V | tail -1)
+          sudo xcode-select -s /Applications/$XCODE/Contents/Developer
+          xcodebuild -version
+          swift --version
+
+      # ── 3. Toolchains ────────────────────────────────────────────────────────
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      # ── 4. Flutter dependencies ───────────────────────────────────────────────
+      - name: Flutter pub get
+        working-directory: ui/flutter
+        run: flutter pub get
+
+      # ── 5. Patch project.pbxproj (idempotent) ────────────────────────────────
+      - name: Patch Xcode project
+        run: python3 scripts/patch_pbxproj.py
+
+      # ── 6. Install CocoaPods dependencies ─────────────────────────────────────
+      - name: Pod install
+        working-directory: ui/flutter/ios
+        run: |
+          gem install cocoapods --no-document 2>/dev/null || true
+          pod install --repo-update
+
+      # ── 7. Build Libgopeed.xcframework (Go → iOS) ─────────────────────────────
+      - name: Cache Libgopeed.xcframework
+        id: cache-xcfw
+        uses: actions/cache@v4
+        with:
+          path: ui/flutter/ios/Frameworks/Libgopeed.xcframework
+          key: libgopeed-${{ hashFiles('bind/mobile/**', 'pkg/**', 'internal/**', 'go.sum') }}
+
+      - name: Build Libgopeed.xcframework
+        if: steps.cache-xcfw.outputs.cache-hit != 'true' && github.event.inputs.skip_gomobile != 'true'
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go get golang.org/x/mobile/bind
+          gomobile init
+          gomobile bind \
+            -tags nosqlite \
+            -ldflags="-w -s" \
+            -o ui/flutter/ios/Frameworks/Libgopeed.xcframework \
+            -target=ios \
+            github.com/GopeedLab/gopeed/bind/mobile
+
+      # ── 8. Build (unsigned IPA) ───────────────────────────────────────────────
+      - name: Build iOS (no codesign)
+        working-directory: ui/flutter
+        run: |
+          flutter build ios \
+            --no-codesign \
+            --dart-define="UPDATE_CHANNEL=iosIpa"
+
+      # ── 9. Package as IPA ─────────────────────────────────────────────────────
+      - name: Package IPA
+        working-directory: ui/flutter
+        run: |
+          mkdir -p Payload
+          cp -r build/ios/iphoneos/Runner.app Payload/
+          zip -r -y Gopeed-ios-bg.ipa Payload/
+          mkdir -p dist
+          mv Gopeed-ios-bg.ipa dist/
+
+      # ── 10. Upload IPA as artifact ────────────────────────────────────────────
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gopeed-ios-background
+          path: ui/flutter/dist/Gopeed-ios-bg.ipa
+          retention-days: 14
+
+      # ── 11. Build summary ─────────────────────────────────────────────────────
+      - name: Summary
+        run: |
+          SIZE=$(du -sh ui/flutter/dist/Gopeed-ios-bg.ipa | cut -f1)
+          echo "## ✅ iOS Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| IPA size | $SIZE |" >> $GITHUB_STEP_SUMMARY
+          echo "| Flutter | ${{ env.FLUTTER_VERSION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Go | ${{ env.GO_VERSION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Download the IPA from the **Artifacts** section above." >> $GITHUB_STEP_SUMMARY
+          echo "Sideload with **LiveContainer**, **AltStore**, or **Sideloadly**." >> $GITHUB_STEP_SUMMARY
