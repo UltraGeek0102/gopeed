@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:contentsize_tabbarview/contentsize_tabbarview.dart';
 import 'package:desktop_drop/desktop_drop.dart';
@@ -15,6 +16,8 @@ import '../../../../api/model/create_task_batch.dart';
 import '../../../../api/model/downloader_config.dart';
 import '../../../../api/model/options.dart';
 import '../../../../api/model/request.dart';
+import '../../../../core/ios_background_download_service.dart';
+import '../../../../core/ios_background_download_lifecycle.dart';
 import '../../../../api/model/resolve_result.dart';
 import '../../../../api/model/resolve_task.dart';
 import '../../../../api/model/task.dart';
@@ -882,7 +885,7 @@ class CreateView extends GetView<CreateController> {
           extra: parseReqOptsExtra(),
         );
         if (isDirect) {
-          await Future.wait(urls.map((url) {
+          final taskIds = await Future.wait(urls.map((url) {
             return createTask(CreateTask(
               req: Request(
                 url: url,
@@ -893,6 +896,41 @@ class CreateView extends GetView<CreateController> {
               opts: opt,
             ));
           }));
+        
+          // ── iOS background download handoff ──────────────────────────
+          if (Platform.isIOS) {
+            final appController = Get.find<AppController>();
+            final destDir = opt.path.isNotEmpty
+                ? opt.path
+                : appController.downloaderConfig.value.downloadDir;
+        
+            for (int i = 0; i < taskIds.length; i++) {
+              final taskId = taskIds[i];
+              final url = urls[i];
+              final filename = opt.name.isNotEmpty ? opt.name : url.split('/').last;
+              final destPath = '$destDir/$filename';
+              final headers = parseReqExtra(url) != null
+                  ? (ReqExtraHttp.fromJson(
+                          jsonDecode(jsonEncode(parseReqExtra(url))))
+                      .header)
+                  : <String, String>{};
+        
+              await IosBackgroundDownloadService.instance.startDownload(
+                id: taskId,
+                url: url,
+                filename: filename,
+                destPath: destPath,
+                headers: headers,
+                onProgress: (progress, downloaded, total) {
+                  Get.find<IosDownloadProgressBus>()
+                      .emit(taskId, progress, downloaded, total);
+                },
+                onComplete: (error) {
+                  Get.find<IosDownloadProgressBus>().emitDone(taskId, error);
+                },
+              );
+            }
+          }
           Get.rootDelegate.offNamed(Routes.TASK);
         } else {
           final rr = await resolve(ResolveTask(
