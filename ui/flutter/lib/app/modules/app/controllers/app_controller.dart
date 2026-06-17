@@ -39,6 +39,7 @@ import '../../../rpc/host_rpc_service.dart';
 import '../../../rpc/webview_rpc_service.dart';
 import '../../redirect/views/redirect_view.dart';
 import '../../../services/notification_service.dart';
+import '../../../../core/ios_background_download_lifecycle.dart';
 
 const unixSocketPath = 'gopeed.sock';
 
@@ -121,6 +122,8 @@ class AppController extends GetxController with WindowListener, TrayListener {
 
     _initCheckUpdate().onError((error, stackTrace) =>
         logger.w("initCheckUpdate error", error, stackTrace));
+    
+    if (Platform.isIOS) IosBackgroundDownloadLifecycle.instance.init();
   }
 
   @override
@@ -132,6 +135,7 @@ class AppController extends GetxController with WindowListener, TrayListener {
       WebViewRpcService.instance.stop();
       LibgopeedBoot.instance.stop();
     }
+    IosBackgroundDownloadLifecycle.instance.dispose();
   }
 
   @override
