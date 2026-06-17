@@ -24,11 +24,31 @@
 		<string>$(FLUTTER_BUILD_NUMBER)</string>
 		<key>LSRequiresIPhoneOS</key>
 		<true />
+
+		<!-- ── Background modes ─────────────────────────────────────── -->
+		<!-- background-fetch  : lets the app wake for periodic refresh  -->
+		<!-- remote-notification: required for push-to-update Live Acts   -->
+		<key>UIBackgroundModes</key>
+		<array>
+			<string>fetch</string>
+			<string>remote-notification</string>
+			<string>processing</string>
+		</array>
+
+		<!-- ── Live Activities ──────────────────────────────────────── -->
+		<key>NSSupportsLiveActivities</key>
+		<true/>
+		<!-- Allow up to 4 updates/min while app is in foreground -->
+		<key>NSSupportsLiveActivitiesFrequentUpdates</key>
+		<true/>
+
+		<!-- ── Transport security ───────────────────────────────────── -->
 		<key>NSAppTransportSecurity</key>
 		<dict>
 			<key>NSAllowsArbitraryLoads</key>
 			<true />
 		</dict>
+
 		<key>UILaunchStoryboardName</key>
 		<string>LaunchScreen</string>
 		<key>UIMainStoryboardFile</key>
@@ -52,17 +72,10 @@
 		<true />
 
 		<!-- Add for share_handler start -->
-		<!-- The 'NSUserActivityTypes' key is only needed if you plan to use the recordSentMessage API
-		allowing for conversations to show up as direct share suggestions -->
 		<key>NSUserActivityTypes</key>
 		<array>
 			<string>INSendMessageIntent</string>
 		</array>
-
-		<!-- Uncomment below lines if you want to use a custom group id rather than the default. Set it
-		in Build Settings -> User-Defined -->
-		<!-- <key>AppGroupId</key>
-<string>$(CUSTOM_GROUP_ID)</string> -->
 
 		<key>CFBundleURLTypes</key>
 		<array>
@@ -79,7 +92,6 @@
 		<key>NSPhotoLibraryUsageDescription</key>
 		<string>Photos can be shared to and used in this app</string>
 
-		<!-- Optional: Add/Customize for AirDrop support -->
 		<key>LSSupportsOpeningDocumentsInPlace</key>
 		<string>No</string>
 		<key>CFBundleDocumentTypes</key>
@@ -100,7 +112,6 @@
 				</array>
 			</dict>
 		</array>
-
 		<!-- Add for share_handler end -->
 	</dict>
 </plist>
