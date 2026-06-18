@@ -78,11 +78,11 @@
 /* Begin PBXFileReference section */
 		AA000001000000000000AAA1 /* BackgroundDownloadManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = BackgroundDownloadManager.swift; sourceTree = "<group>"; };
 		AA000001000000000000AAA3 /* LiveActivityBridge.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = LiveActivityBridge.swift; sourceTree = "<group>"; };
-		AA000001000000000000AAA5 /* DownloadActivityAttributes.swift (Runner) */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; name = DownloadActivityAttributes.swift; path = Shared/DownloadActivityAttributes.swift; sourceTree = "<group>"; };
+		AA000001000000000000AAA5 /* DownloadActivityAttributes.swift (Runner) */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = DownloadActivityAttributes.swift; sourceTree = "<group>"; };
 		BB000001000000000000BBB2 /* GopeedWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = GopeedWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB000001000000000000BBBA /* GopeedDownloadWidget.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = GopeedDownloadWidget.swift; sourceTree = "<group>"; };
 		BB000001000000000000BBBC /* GopeedWidgetsBundle.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = GopeedWidgetsBundle.swift; sourceTree = "<group>"; };
-		BB000001000000000000BBBE /* DownloadActivityAttributes.swift (GopeedWidgets) */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; name = DownloadActivityAttributes.swift; path = ../Shared/DownloadActivityAttributes.swift; sourceTree = "<group>"; };
+		BB000001000000000000BBBE /* DownloadActivityAttributes.swift (GopeedWidgets) */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = DownloadActivityAttributes.swift; sourceTree = "<group>"; };
 		BB000001000000000000BBB0 /* GopeedWidgets/Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 
 		029EF293EAA92EB3D18BBF19 /* libresolv.tbd */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libresolv.tbd; path = usr/lib/libresolv.tbd; sourceTree = "<group>"; };
