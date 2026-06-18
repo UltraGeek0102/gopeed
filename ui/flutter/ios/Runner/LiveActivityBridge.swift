@@ -49,7 +49,7 @@ private class LiveActivityManager {
         }
 
         let attrs = DownloadActivityAttributes(downloadId: id, filename: filename)
-        let state = DownloadActivityAttributes.ContentState(
+        let initialState = DownloadActivityAttributes.ContentState(
             progress: 0,
             downloadedBytes: 0,
             totalBytes: 0,
@@ -60,11 +60,14 @@ private class LiveActivityManager {
         do {
             let activity = try Activity<DownloadActivityAttributes>.request(
                 attributes: attrs,
-                content: .init(state: state, staleDate: Date().addingTimeInterval(4 * 3600))
+                content: ActivityContent(
+                    state: initialState,
+                    staleDate: Date().addingTimeInterval(4 * 3600)
+                )
             )
             activities[id] = activity
         } catch {
-            // Live Activities not available / user disabled them — silent fail is fine
+            // Live Activities not available or user disabled them — silent fail
             print("[LiveActivity] start failed for \(id): \(error)")
         }
     }
@@ -80,7 +83,7 @@ private class LiveActivityManager {
         lastBytes[id] = downloaded
         lastTime[id] = now
 
-        let state = DownloadActivityAttributes.ContentState(
+        let updatedState = DownloadActivityAttributes.ContentState(
             progress: min(max(progress, 0), 1),
             downloadedBytes: downloaded,
             totalBytes: total,
@@ -89,7 +92,9 @@ private class LiveActivityManager {
         )
 
         Task {
-            await activity.update(using: state)
+            await activity.update(
+                ActivityContent(state: updatedState, staleDate: nil)
+            )
         }
     }
 
@@ -97,11 +102,7 @@ private class LiveActivityManager {
         guard let activity = activities[id] else { return }
 
         let finalState = DownloadActivityAttributes.ContentState(
-            progress: success ? 1.0 : (lastBytes[id].map {
-                let total = lastBytes[id] ?? 0
-                // We don't have totalBytes here, just leave progress as-is
-                return 0.0
-            } ?? 0.0),
+            progress: success ? 1.0 : 0.0,
             downloadedBytes: lastBytes[id] ?? 0,
             totalBytes: 0,
             speedBytesPerSec: 0,
@@ -109,7 +110,6 @@ private class LiveActivityManager {
         )
 
         Task {
-            // Show final state for 5 seconds then dismiss
             await activity.end(
                 ActivityContent(state: finalState, staleDate: nil),
                 dismissalPolicy: .after(Date().addingTimeInterval(5))
