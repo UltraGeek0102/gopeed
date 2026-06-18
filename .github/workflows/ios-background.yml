@@ -4,7 +4,6 @@ on:
   push:
     branches: [main, master]
     paths:
-      # Trigger only when iOS-related files change
       - 'ui/flutter/ios/**'
       - 'ui/flutter/lib/**'
       - 'ui/flutter/pubspec.yaml'
@@ -24,23 +23,22 @@ env:
 
 jobs:
   build-ios:
-    runs-on: macos-14          # Apple Silicon, Xcode 15+
+    runs-on: macos-14
 
     steps:
-      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      # ── 1. Checkout ───────────────────────────────────────────────────────────
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 2. Xcode version ─────────────────────────────────────────────────────
-      - name: Select Xcode 16
+      # ── 2. Xcode version ──────────────────────────────────────────────────────
+      - name: Select Xcode
         run: |
-          # Use latest available Xcode on the runner
-          XCODE=$(ls /Applications | grep Xcode | sort -V | tail -1)
+          XCODE=$(ls /Applications | grep "^Xcode" | sort -V | tail -1)
           sudo xcode-select -s /Applications/$XCODE/Contents/Developer
           xcodebuild -version
           swift --version
 
-      # ── 3. Toolchains ────────────────────────────────────────────────────────
+      # ── 3. Toolchains ─────────────────────────────────────────────────────────
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -54,23 +52,45 @@ jobs:
           channel: stable
           cache: true
 
-      # ── 4. Flutter dependencies ───────────────────────────────────────────────
+      # ── 4. Sync widget version from pubspec ───────────────────────────────────
+      # Sideloaders (Feather, SideStore) don't expand $(FLUTTER_BUILD_NAME) variables.
+      # We hardcode real values into GopeedWidgets/Info.plist so the extension
+      # bundle is always valid — otherwise iOS refuses to install it.
+      - name: Sync widget bundle version
+        run: |
+          PUBSPEC="ui/flutter/pubspec.yaml"
+          WIDGET_PLIST="ui/flutter/ios/GopeedWidgets/Info.plist"
+
+          # Extract version string e.g. "1.9.3+1"
+          VERSION_LINE=$(grep '^version:' "$PUBSPEC" | head -1)
+          BUILD_NAME=$(echo "$VERSION_LINE" | sed 's/version: //' | cut -d'+' -f1 | tr -d '[:space:]')
+          BUILD_NUMBER=$(echo "$VERSION_LINE" | sed 's/version: //' | cut -d'+' -f2 | tr -d '[:space:]')
+
+          # Fallback if no + suffix
+          [ -z "$BUILD_NUMBER" ] && BUILD_NUMBER="1"
+
+          echo "Setting widget version: $BUILD_NAME ($BUILD_NUMBER)"
+
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $BUILD_NAME" "$WIDGET_PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$WIDGET_PLIST"
+
+      # ── 5. Flutter dependencies ───────────────────────────────────────────────
       - name: Flutter pub get
         working-directory: ui/flutter
         run: flutter pub get
 
-      # ── 5. Patch project.pbxproj (idempotent) ────────────────────────────────
+      # ── 6. Patch project.pbxproj (idempotent) ─────────────────────────────────
       - name: Patch Xcode project
         run: python3 scripts/patch_pbxproj.py
 
-      # ── 6. Install CocoaPods dependencies ─────────────────────────────────────
+      # ── 7. Pod install ────────────────────────────────────────────────────────
       - name: Pod install
         working-directory: ui/flutter/ios
         run: |
           gem install cocoapods --no-document 2>/dev/null || true
           pod install --repo-update
 
-      # ── 7. Build Libgopeed.xcframework (Go → iOS) ─────────────────────────────
+      # ── 8. Build Libgopeed.xcframework (Go → iOS) ─────────────────────────────
       - name: Cache Libgopeed.xcframework
         id: cache-xcfw
         uses: actions/cache@v4
@@ -91,7 +111,7 @@ jobs:
             -target=ios \
             github.com/GopeedLab/gopeed/bind/mobile
 
-      # ── 8. Build (unsigned IPA) ───────────────────────────────────────────────
+      # ── 9. Build (unsigned) ───────────────────────────────────────────────────
       - name: Build iOS (no codesign)
         working-directory: ui/flutter
         run: |
@@ -99,7 +119,44 @@ jobs:
             --no-codesign \
             --dart-define="UPDATE_CHANNEL=iosIpa"
 
-      # ── 9. Package as IPA ─────────────────────────────────────────────────────
+      # ── 10. Inject real version strings into built app extension ──────────────
+      # flutter build copies the source Info.plist but may still leave variables
+      # unexpanded in the .appex. We patch the built copy to be certain.
+      - name: Fix appex bundle version
+        working-directory: ui/flutter
+        run: |
+          APPEX="build/ios/iphoneos/Runner.app/PlugIns/GopeedWidgets.appex/Info.plist"
+          if [ -f "$APPEX" ]; then
+            PUBSPEC="pubspec.yaml"
+            VERSION_LINE=$(grep '^version:' "$PUBSPEC" | head -1)
+            BUILD_NAME=$(echo "$VERSION_LINE" | sed 's/version: //' | cut -d'+' -f1 | tr -d '[:space:]')
+            BUILD_NUMBER=$(echo "$VERSION_LINE" | sed 's/version: //' | cut -d'+' -f2 | tr -d '[:space:]')
+            [ -z "$BUILD_NUMBER" ] && BUILD_NUMBER="1"
+
+            echo "Patching built appex: $BUILD_NAME ($BUILD_NUMBER)"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $BUILD_NAME" "$APPEX"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$APPEX"
+
+            # Also replace any remaining $(FLUTTER_BUILD_*) literals
+            /usr/bin/plutil -convert xml1 "$APPEX"
+            sed -i '' \
+              "s|\$(FLUTTER_BUILD_NAME)|$BUILD_NAME|g;
+               s|\$(FLUTTER_BUILD_NUMBER)|$BUILD_NUMBER|g;
+               s|\$(DEVELOPMENT_LANGUAGE)|en|g;
+               s|\$(EXECUTABLE_NAME)|GopeedWidgets|g;
+               s|\$(PRODUCT_BUNDLE_IDENTIFIER)|com.gopeed.gopeed.GopeedWidgets|g;
+               s|\$(PRODUCT_NAME)|GopeedWidgets|g;
+               s|\$(PRODUCT_BUNDLE_PACKAGE_TYPE)|XPC!|g" \
+              "$APPEX"
+
+            echo "appex Info.plist after patch:"
+            cat "$APPEX"
+          else
+            echo "Warning: appex not found at $APPEX"
+            find build/ios/iphoneos -name "*.appex" 2>/dev/null
+          fi
+
+      # ── 11. Package as IPA ────────────────────────────────────────────────────
       - name: Package IPA
         working-directory: ui/flutter
         run: |
@@ -109,7 +166,7 @@ jobs:
           mkdir -p dist
           mv Gopeed-ios-bg.ipa dist/
 
-      # ── 10. Upload IPA as artifact ────────────────────────────────────────────
+      # ── 12. Upload IPA ────────────────────────────────────────────────────────
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
@@ -117,7 +174,7 @@ jobs:
           path: ui/flutter/dist/Gopeed-ios-bg.ipa
           retention-days: 14
 
-      # ── 11. Build summary ─────────────────────────────────────────────────────
+      # ── 13. Build summary ─────────────────────────────────────────────────────
       - name: Summary
         run: |
           SIZE=$(du -sh ui/flutter/dist/Gopeed-ios-bg.ipa | cut -f1)
@@ -130,4 +187,4 @@ jobs:
           echo "| Go | ${{ env.GO_VERSION }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Download the IPA from the **Artifacts** section above." >> $GITHUB_STEP_SUMMARY
-          echo "Sideload with **LiveContainer**, **AltStore**, or **Sideloadly**." >> $GITHUB_STEP_SUMMARY
+          echo "Sideload with **Feather**, **SideStore**, or **LiveContainer**." >> $GITHUB_STEP_SUMMARY
