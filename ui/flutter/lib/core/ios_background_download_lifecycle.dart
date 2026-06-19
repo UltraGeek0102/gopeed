@@ -40,18 +40,7 @@ class IosBackgroundDownloadLifecycle {
     try {
       final tasks = await getTasks([Status.running]);
       for (final task in tasks) {
-        await IosBackgroundDownloadService.instance.reattach(
-          task.id,
-          onProgress: (progress, downloaded, total) {
-            // You can broadcast this via a GetX reactive variable or EventBus.
-            // For now, we fire a named event that task list controllers listen to.
-            Get.find<_ProgressEventBus>()
-                .emit(task.id, progress, downloaded, total);
-          },
-          onComplete: (error) {
-            Get.find<_ProgressEventBus>().emitDone(task.id, error);
-          },
-        );
+        await IosBackgroundDownloadService.instance.reattach(task.id);
       }
     } catch (_) {
       // If the Go engine hasn't started yet, skip silently
