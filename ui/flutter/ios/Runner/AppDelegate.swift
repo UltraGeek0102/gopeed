@@ -92,12 +92,10 @@ import Libgopeed
             }
             let headers = args["headers"] as? [String: String] ?? [:]
 
-            // Start Live Activity (no-op below iOS 16.2)
-            LiveActivityBridge.shared.start(id: id, filename: filename)
-
             BackgroundDownloadManager.shared.startDownload(
                 id: id,
                 url: url,
+                filename: filename,
                 headers: headers,
                 destPath: destPath,
                 onProgress: { [weak self] progress, downloaded, total in
