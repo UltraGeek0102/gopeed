@@ -1,293 +1,218 @@
 import Foundation
 import UIKit
+import AVFoundation
 
-/// Manages iOS NSURLSession background downloads independently of the Flutter/Go engine.
-/// Downloads survive app backgrounding, screen lock, and even app suspension.
+/// Keeps the Go download engine alive while the app is backgrounded.
+///
+/// iOS suspends apps ~30s after backgrounding. We work around this using:
+/// 1. AVAudioSession with a silent looping audio player — keeps the process running
+///    indefinitely (same technique used by Infuse, nPlayer, many download managers)
+/// 2. UIApplication.beginBackgroundTask as a fallback for the first 30s
+///
+/// NSURLSession background sessions are NOT used here because the Go HTTP fetcher
+/// keeps the resolve response body open and reuses it for downloading — a separate
+/// NSURLSession request would open a new connection and break one-time URLs.
 class BackgroundDownloadManager: NSObject {
 
     static let shared = BackgroundDownloadManager()
 
-    private let sessionIdentifier = "com.gopeed.gopeed.bgdownload"
+    // MARK: - State
 
-    private lazy var session: URLSession = {
-        let config = URLSessionConfiguration.background(withIdentifier: sessionIdentifier)
-        config.isDiscretionary = false
-        config.sessionSendsLaunchEvents = true
-        config.allowsCellularAccess = true
-        config.httpMaximumConnectionsPerHost = 4
-        return URLSession(configuration: config, delegate: self, delegateQueue: nil)
-    }()
-
-    // taskIdentifier → gopeed download id
-    private var taskIdMap: [Int: String] = [:]
-    // gopeed download id → display filename (for Live Activity)
-    private var filenameMap: [String: String] = [:]
-    // gopeed download id → progress callback (only active while app is foreground)
-    private var progressHandlers: [String: (Double, Int64, Int64) -> Void] = [:]
-    // gopeed download id → completion callback
-    private var completionHandlers: [String: (Error?) -> Void] = [:]
-    // Set by AppDelegate when OS wakes the app for a background session event
-    var backgroundCompletionHandler: (() -> Void)?
-    // Track whether Live Activity has been started for each id
-    private var liveActivityStarted: Set<String> = []
-
+    private var activeDownloadIds: Set<String> = []
+    private var bgTaskId: UIBackgroundTaskIdentifier = .invalid
+    private var audioPlayer: AVAudioPlayer?
+    private var keepAliveTimer: Timer?
     private let lock = NSLock()
+
+    // Progress/completion callbacks forwarded to Flutter
+    var progressHandlers: [String: (Double, Int64, Int64) -> Void] = [:]
+    var completionHandlers: [String: (Error?) -> Void] = [:]
 
     private override init() {
         super.init()
-        if let saved = UserDefaults.standard.dictionary(forKey: "bgdl_taskmap") as? [String: Int] {
-            for (downloadId, taskId) in saved {
-                taskIdMap[taskId] = downloadId
-            }
-        }
-        if let saved = UserDefaults.standard.dictionary(forKey: "bgdl_filenames") as? [String: String] {
-            filenameMap = saved
+        setupAudioSession()
+    }
+
+    // MARK: - Audio session (the real background keep-alive)
+
+    private func setupAudioSession() {
+        do {
+            // .playback category keeps the app alive even with screen locked
+            // .mixWithOthers so we don't interrupt user's music
+            try AVAudioSession.sharedInstance().setCategory(
+                .playback,
+                options: [.mixWithOthers, .duckOthers]
+            )
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            print("[BgDL] AVAudioSession setup failed: \(error)")
         }
     }
 
-    // MARK: - Public API
+    /// Start playing a silent audio loop to hold the background process alive.
+    private func startSilentAudio() {
+        guard audioPlayer == nil || audioPlayer?.isPlaying == false else { return }
 
-    func startDownload(
+        // Generate a tiny (0.1s) silent PCM WAV in memory — no file needed
+        let sampleRate: Double = 44100
+        let duration: Double = 0.1
+        let numSamples = Int(sampleRate * duration)
+        let dataSize = numSamples * 2  // 16-bit mono
+        let headerSize = 44
+        var wav = Data(count: headerSize + dataSize)
+
+        wav.withUnsafeMutableBytes { ptr in
+            guard let base = ptr.baseAddress else { return }
+            // RIFF header
+            let header: [UInt8] = [
+                0x52,0x49,0x46,0x46,                              // "RIFF"
+                UInt8((dataSize+36) & 0xFF), UInt8((dataSize+36)>>8 & 0xFF),
+                UInt8((dataSize+36)>>16 & 0xFF), UInt8((dataSize+36)>>24 & 0xFF),
+                0x57,0x41,0x56,0x45,                              // "WAVE"
+                0x66,0x6D,0x74,0x20,                              // "fmt "
+                0x10,0x00,0x00,0x00,                              // chunk size = 16
+                0x01,0x00,                                         // PCM
+                0x01,0x00,                                         // mono
+                0x44,0xAC,0x00,0x00,                              // 44100 Hz
+                0x88,0x58,0x01,0x00,                              // byte rate
+                0x02,0x00,                                         // block align
+                0x10,0x00,                                         // 16-bit
+                0x64,0x61,0x74,0x61,                              // "data"
+                UInt8(dataSize & 0xFF), UInt8(dataSize>>8 & 0xFF),
+                UInt8(dataSize>>16 & 0xFF), UInt8(dataSize>>24 & 0xFF),
+            ]
+            header.enumerated().forEach { base.storeBytes(of: $0.element, toByteOffset: $0.offset, as: UInt8.self) }
+            // data bytes are already zero (silence)
+        }
+
+        do {
+            audioPlayer = try AVAudioPlayer(data: wav, fileTypeHint: AVFileType.wav.rawValue)
+            audioPlayer?.numberOfLoops = -1  // loop forever
+            audioPlayer?.volume = 0.0        // truly silent
+            audioPlayer?.prepareToPlay()
+            audioPlayer?.play()
+            print("[BgDL] Silent audio started — app will stay alive in background")
+        } catch {
+            print("[BgDL] AVAudioPlayer init failed: \(error)")
+        }
+    }
+
+    private func stopSilentAudio() {
+        audioPlayer?.stop()
+        audioPlayer = nil
+        print("[BgDL] Silent audio stopped")
+    }
+
+    // MARK: - Background task token (fallback, ~30s)
+
+    private func beginBgTask() {
+        guard bgTaskId == .invalid else { return }
+        bgTaskId = UIApplication.shared.beginBackgroundTask(withName: "gopeed.download") {
+            // Expiration handler — iOS is about to suspend us
+            // The silent audio should have already kicked in, but just in case:
+            print("[BgDL] Background task expired — relying on audio session")
+            UIApplication.shared.endBackgroundTask(self.bgTaskId)
+            self.bgTaskId = .invalid
+        }
+    }
+
+    private func endBgTask() {
+        if bgTaskId != .invalid {
+            UIApplication.shared.endBackgroundTask(bgTaskId)
+            bgTaskId = .invalid
+        }
+    }
+
+    // MARK: - Public API (called by AppDelegate / Flutter channel)
+
+    func registerDownload(
         id: String,
-        url: String,
         filename: String,
-        headers: [String: String],
-        destPath: String,
-        onProgress: @escaping (Double, Int64, Int64) -> Void,
-        onComplete: @escaping (Error?) -> Void
-    ) {
-        guard let downloadURL = URL(string: url) else {
-            onComplete(NSError(domain: "com.gopeed", code: -1,
-                               userInfo: [NSLocalizedDescriptionKey: "Invalid URL: \(url)"]))
-            return
-        }
-
-        UserDefaults.standard.set(destPath, forKey: "bgdl_dest_\(id)")
-
-        lock.lock()
-        filenameMap[id] = filename
-        persistFilenameMap()
-        progressHandlers[id] = onProgress
-        completionHandlers[id] = onComplete
-        lock.unlock()
-
-        var request = URLRequest(url: downloadURL)
-        request.timeoutInterval = 0
-        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
-
-        let task = session.downloadTask(with: request)
-        lock.lock()
-        taskIdMap[task.taskIdentifier] = id
-        persistTaskMap()
-        lock.unlock()
-
-        task.resume()
-    }
-
-    func pauseDownload(id: String) {
-        findTask(for: id) { [weak self] task in
-            task?.cancel(byProducingResumeData: { resumeData in
-                if let data = resumeData {
-                    UserDefaults.standard.set(data, forKey: "bgdl_resume_\(id)")
-                }
-                self?.lock.lock()
-                if let taskId = task?.taskIdentifier {
-                    self?.taskIdMap.removeValue(forKey: taskId)
-                    self?.persistTaskMap()
-                }
-                self?.lock.unlock()
-            })
-        }
-    }
-
-    func resumeDownload(
-        id: String,
         onProgress: @escaping (Double, Int64, Int64) -> Void,
         onComplete: @escaping (Error?) -> Void
     ) {
         lock.lock()
+        activeDownloadIds.insert(id)
         progressHandlers[id] = onProgress
         completionHandlers[id] = onComplete
         lock.unlock()
 
-        if let resumeData = UserDefaults.standard.data(forKey: "bgdl_resume_\(id)") {
-            let task = session.downloadTask(withResumeData: resumeData)
-            lock.lock()
-            taskIdMap[task.taskIdentifier] = id
-            persistTaskMap()
-            lock.unlock()
-            UserDefaults.standard.removeObject(forKey: "bgdl_resume_\(id)")
-            task.resume()
-        } else {
-            onComplete(NSError(domain: "com.gopeed", code: -2,
-                               userInfo: [NSLocalizedDescriptionKey: "No resume data for \(id)"]))
+        // Start keep-alive mechanisms
+        DispatchQueue.main.async {
+            self.beginBgTask()
+            self.startSilentAudio()
+            LiveActivityBridge.shared.start(id: id, filename: filename)
+        }
+    }
+
+    func updateProgress(id: String, progress: Double, downloaded: Int64, total: Int64) {
+        lock.lock()
+        let handler = progressHandlers[id]
+        lock.unlock()
+        DispatchQueue.main.async {
+            handler?(progress, downloaded, total)
+            LiveActivityBridge.shared.update(id: id, progress: progress,
+                                             downloaded: downloaded, total: total)
+        }
+    }
+
+    func completeDownload(id: String, errorMessage: String?) {
+        lock.lock()
+        let handler = completionHandlers[id]
+        activeDownloadIds.remove(id)
+        progressHandlers.removeValue(forKey: id)
+        completionHandlers.removeValue(forKey: id)
+        let remaining = activeDownloadIds.count
+        lock.unlock()
+
+        let error: Error? = errorMessage.map {
+            NSError(domain: "com.gopeed", code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: $0])
+        }
+
+        DispatchQueue.main.async {
+            handler?(error)
+            LiveActivityBridge.shared.end(id: id, success: error == nil)
+
+            // Only stop keep-alive when ALL downloads are done
+            if remaining == 0 {
+                self.stopSilentAudio()
+                self.endBgTask()
+                print("[BgDL] All downloads complete — released background resources")
+            }
         }
     }
 
     func cancelDownload(id: String) {
-        findTask(for: id) { [weak self] task in
-            task?.cancel()
-            self?.lock.lock()
-            if let taskId = task?.taskIdentifier {
-                self?.taskIdMap.removeValue(forKey: taskId)
-                self?.persistTaskMap()
-            }
-            self?.progressHandlers.removeValue(forKey: id)
-            self?.completionHandlers.removeValue(forKey: id)
-            self?.filenameMap.removeValue(forKey: id)
-            self?.persistFilenameMap()
-            self?.liveActivityStarted.remove(id)
-            self?.lock.unlock()
-            UserDefaults.standard.removeObject(forKey: "bgdl_dest_\(id)")
-            UserDefaults.standard.removeObject(forKey: "bgdl_resume_\(id)")
-        }
+        completeDownload(id: id, errorMessage: "cancelled")
+        LiveActivityBridge.shared.end(id: id, success: false)
     }
 
-    func reattach(
-        id: String,
-        onProgress: @escaping (Double, Int64, Int64) -> Void,
-        onComplete: @escaping (Error?) -> Void
-    ) {
+    func reattach(id: String,
+                  onProgress: @escaping (Double, Int64, Int64) -> Void,
+                  onComplete: @escaping (Error?) -> Void) {
         lock.lock()
         progressHandlers[id] = onProgress
         completionHandlers[id] = onComplete
         lock.unlock()
     }
 
-    // MARK: - Private helpers
+    // MARK: - App lifecycle hooks (called from AppDelegate)
 
-    private func findTask(for id: String, completion: @escaping (URLSessionDownloadTask?) -> Void) {
+    func applicationDidEnterBackground() {
         lock.lock()
-        let taskId = taskIdMap.first(where: { $0.value == id })?.key
+        let hasActive = !activeDownloadIds.isEmpty
         lock.unlock()
-        session.getTasksWithCompletionHandler { _, _, downloadTasks in
-            completion(downloadTasks.first(where: { $0.taskIdentifier == taskId }))
+        if hasActive {
+            beginBgTask()
+            startSilentAudio()
+            print("[BgDL] App backgrounded with \(activeDownloadIds.count) active downloads")
         }
     }
 
-    private func persistTaskMap() {
-        let inverted = Dictionary(uniqueKeysWithValues: taskIdMap.map { ($1, $0) })
-        UserDefaults.standard.set(inverted, forKey: "bgdl_taskmap")
-    }
-
-    private func persistFilenameMap() {
-        UserDefaults.standard.set(filenameMap, forKey: "bgdl_filenames")
-    }
-}
-
-// MARK: - URLSessionDownloadDelegate
-
-extension BackgroundDownloadManager: URLSessionDownloadDelegate {
-
-    func urlSession(
-        _ session: URLSession,
-        downloadTask: URLSessionDownloadTask,
-        didWriteData bytesWritten: Int64,
-        totalBytesWritten: Int64,
-        totalBytesExpectedToWrite: Int64
-    ) {
-        lock.lock()
-        let id = taskIdMap[downloadTask.taskIdentifier]
-        let handler = id.flatMap { progressHandlers[$0] }
-        let filename = id.flatMap { filenameMap[$0] } ?? "Downloading..."
-        let needsStart = id.map { !liveActivityStarted.contains($0) } ?? false
-        if let downloadId = id, needsStart {
-            liveActivityStarted.insert(downloadId)
-        }
-        lock.unlock()
-
-        guard let downloadId = id else { return }
-
-        let progress = totalBytesExpectedToWrite > 0
-            ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-            : 0.0
-
-        DispatchQueue.main.async {
-            // Start Live Activity on first data received — this is when we know
-            // the download is actually running, not just queued
-            if needsStart {
-                LiveActivityBridge.shared.start(id: downloadId, filename: filename)
-            }
-            handler?(progress, totalBytesWritten, totalBytesExpectedToWrite)
-            LiveActivityBridge.shared.update(
-                id: downloadId,
-                progress: progress,
-                downloaded: totalBytesWritten,
-                total: totalBytesExpectedToWrite
-            )
-        }
-    }
-
-    func urlSession(
-        _ session: URLSession,
-        downloadTask: URLSessionDownloadTask,
-        didFinishDownloadingTo location: URL
-    ) {
-        lock.lock()
-        let id = taskIdMap[downloadTask.taskIdentifier]
-        lock.unlock()
-
-        guard let downloadId = id else { return }
-
-        if let destPath = UserDefaults.standard.string(forKey: "bgdl_dest_\(downloadId)") {
-            let destURL = URL(fileURLWithPath: destPath)
-            do {
-                try FileManager.default.createDirectory(
-                    at: destURL.deletingLastPathComponent(),
-                    withIntermediateDirectories: true,
-                    attributes: nil
-                )
-                if FileManager.default.fileExists(atPath: destURL.path) {
-                    try FileManager.default.removeItem(at: destURL)
-                }
-                try FileManager.default.moveItem(at: location, to: destURL)
-            } catch {
-                DispatchQueue.main.async { self.fireComplete(id: downloadId, error: error) }
-                return
-            }
-        }
-
-        DispatchQueue.main.async { self.fireComplete(id: downloadId, error: nil) }
-    }
-
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        didCompleteWithError error: Error?
-    ) {
-        guard let error = error else { return }
-        let nsErr = error as NSError
-        if nsErr.domain == NSURLErrorDomain && nsErr.code == NSURLErrorCancelled { return }
-
-        lock.lock()
-        let id = taskIdMap[task.taskIdentifier]
-        lock.unlock()
-
-        guard let downloadId = id else { return }
-        DispatchQueue.main.async { self.fireComplete(id: downloadId, error: error) }
-    }
-
-    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
-        DispatchQueue.main.async {
-            self.backgroundCompletionHandler?()
-            self.backgroundCompletionHandler = nil
-        }
-    }
-
-    private func fireComplete(id: String, error: Error?) {
-        lock.lock()
-        let handler = completionHandlers[id]
-        taskIdMap = taskIdMap.filter { $0.value != id }
-        persistTaskMap()
-        progressHandlers.removeValue(forKey: id)
-        completionHandlers.removeValue(forKey: id)
-        filenameMap.removeValue(forKey: id)
-        persistFilenameMap()
-        liveActivityStarted.remove(id)
-        lock.unlock()
-
-        UserDefaults.standard.removeObject(forKey: "bgdl_dest_\(id)")
-        LiveActivityBridge.shared.end(id: id, success: error == nil)
-        handler?(error)
+    func applicationWillEnterForeground() {
+        // Keep audio running until downloads finish — don't stop here
+        endBgTask()
+        print("[BgDL] App foregrounded")
     }
 }
