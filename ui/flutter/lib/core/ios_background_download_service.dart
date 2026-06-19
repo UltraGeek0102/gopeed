@@ -4,67 +4,60 @@ import 'package:flutter/services.dart';
 /// iOS background download coordinator.
 ///
 /// The Go engine does all HTTP work. This service:
-/// 1. Tells native to start keep-alive (AVAudioSession + BGTask) when a download starts
-/// 2. Forwards progress events to native for Live Activity updates
-/// 3. Tells native when a download finishes so resources are released
+///  1. Passes the Go engine's TCP port to Swift so the native polling timer
+///     can call /api/v1/tasks directly from Swift while the app is backgrounded.
+///  2. Starts AVAudioSession keep-alive + Live Activity when a download registers.
+///  3. Forwards progress to Live Activity while the app is foregrounded.
 ///
-/// On non-iOS platforms every method is a no-op.
+/// No-op on non-iOS platforms.
 class IosBackgroundDownloadService {
   IosBackgroundDownloadService._();
   static final instance = IosBackgroundDownloadService._();
 
-  static const _channel = MethodChannel('gopeed.com/background_download');
+  static const _ch = MethodChannel('gopeed.com/background_download');
 
-  final _progressHandlers = <String, void Function(double, int, int)>{};
-  final _completeHandlers = <String, void Function(String?)>{};
   bool _initialized = false;
 
   void _ensureInit() {
     if (_initialized || !Platform.isIOS) return;
     _initialized = true;
-    _channel.setMethodCallHandler(_handleNativeCall);
+    _ch.setMethodCallHandler(_handleNative);
   }
 
-  Future<dynamic> _handleNativeCall(MethodCall call) async {
-    final args = (call.arguments as Map?)?.cast<String, dynamic>() ?? {};
-    final id = args['id'] as String? ?? '';
-    switch (call.method) {
-      case 'onProgress':
-        _progressHandlers[id]?.call(
-          (args['progress'] as num).toDouble(),
-          (args['downloaded'] as num).toInt(),
-          (args['total'] as num).toInt(),
-        );
-        break;
-      case 'onComplete':
-        final error = args['error'] as String?;
-        _completeHandlers[id]?.call(error);
-        _progressHandlers.remove(id);
-        _completeHandlers.remove(id);
-        break;
-    }
+  Future<dynamic> _handleNative(MethodCall call) async {
+    // Native→Flutter callbacks are not needed in the current architecture
+    // (Swift polls Go directly). Kept for future use.
   }
 
-  /// Called when a download task starts.
-  /// Starts keep-alive + Live Activity. Go engine handles the actual download.
-  Future<void> registerDownload({
-    required String id,
-    required String filename,
-    void Function(double, int, int)? onProgress,
-    void Function(String?)? onComplete,
+  /// Call once after the Go engine starts so Swift knows the TCP port.
+  Future<void> configureGoEngine({
+    required int port,
+    required String apiToken,
   }) async {
     if (!Platform.isIOS) return;
     _ensureInit();
-    if (onProgress != null) _progressHandlers[id] = onProgress;
-    if (onComplete != null) _completeHandlers[id] = onComplete;
-    await _channel.invokeMethod<void>('registerDownload', {
+    await _ch.invokeMethod<void>('configureGoEngine', {
+      'port': port,
+      'apiToken': apiToken,
+    });
+  }
+
+  /// Call when a download task starts.
+  /// Starts AVAudioSession keep-alive + Live Activity.
+  Future<void> registerDownload({
+    required String id,
+    required String filename,
+  }) async {
+    if (!Platform.isIOS) return;
+    _ensureInit();
+    await _ch.invokeMethod<void>('registerDownload', {
       'id': id,
       'filename': filename,
     });
   }
 
-  /// Forward a progress update to native (for Live Activity).
-  /// Call this from your existing download progress polling.
+  /// Forward a progress update while the app is foregrounded.
+  /// (Swift's native timer handles this when backgrounded.)
   Future<void> updateProgress(
     String id, {
     required double progress,
@@ -72,7 +65,7 @@ class IosBackgroundDownloadService {
     required int total,
   }) async {
     if (!Platform.isIOS) return;
-    await _channel.invokeMethod<void>('updateProgress', {
+    await _ch.invokeMethod<void>('updateProgress', {
       'id': id,
       'progress': progress,
       'downloaded': downloaded,
@@ -80,34 +73,23 @@ class IosBackgroundDownloadService {
     });
   }
 
-  /// Called when the Go engine finishes a download (success or error).
+  /// Call when the Go engine finishes a task (success or error).
   Future<void> completeDownload(String id, {String? error}) async {
     if (!Platform.isIOS) return;
-    _progressHandlers.remove(id);
-    _completeHandlers.remove(id);
-    await _channel.invokeMethod<void>('completeDownload', {
+    await _ch.invokeMethod<void>('completeDownload', {
       'id': id,
       if (error != null) 'error': error,
     });
   }
 
-  /// Cancel — stops keep-alive for this download.
   Future<void> cancelDownload(String id) async {
     if (!Platform.isIOS) return;
-    _progressHandlers.remove(id);
-    _completeHandlers.remove(id);
-    await _channel.invokeMethod<void>('cancelDownload', {'id': id});
+    await _ch.invokeMethod<void>('cancelDownload', {'id': id});
   }
 
-  Future<void> reattach(
-    String id, {
-    required void Function(double, int, int) onProgress,
-    required void Function(String?) onComplete,
-  }) async {
+  Future<void> reattach(String id) async {
     if (!Platform.isIOS) return;
     _ensureInit();
-    _progressHandlers[id] = onProgress;
-    _completeHandlers[id] = onComplete;
-    await _channel.invokeMethod<void>('reattach', {'id': id});
+    await _ch.invokeMethod<void>('reattach', {'id': id});
   }
 }
