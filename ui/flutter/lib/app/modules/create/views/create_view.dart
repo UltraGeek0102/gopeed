@@ -897,79 +897,25 @@ class CreateView extends GetView<CreateController> {
             ));
           }));
         
-          // ── iOS background download handoff ──────────────────────────
-          // Strategy:
-          //  1. Pause the Go engine task immediately so it stops downloading.
-          //  2. Fetch the task details to get the resolved URL and exact save path.
-          //  3. Hand the download to NSURLSession (survives backgrounding).
-          //  4. When NSURLSession finishes, delete the Go task (file is on disk).
+          // ── iOS background download keep-alive ───────────────────────
+          // The Go engine handles the HTTP download. We just tell native to
+          // start AVAudioSession keep-alive + Live Activity for each task.
           if (Platform.isIOS) {
             for (final taskId in taskIds) {
-              // Step 1: pause the Go engine so it doesn't race with NSURLSession
-              try { await pauseTask(taskId); } catch (_) {}
-
-              // Step 2: fetch resolved task metadata from Go engine
-              // Retry briefly since the engine may not have resolved the URL yet
-              Task? task;
-              for (int attempt = 0; attempt < 5; attempt++) {
-                try {
-                  task = await getTask(taskId);
-                  if (task.meta.res != null) break;
-                } catch (_) {}
-                await Future.delayed(const Duration(milliseconds: 300));
+              String filename = '';
+              try {
+                final task = await getTask(taskId);
+                filename = task.name;
+              } catch (_) {}
+              if (filename.isEmpty) {
+                final idx = taskIds.indexOf(taskId);
+                filename = (idx < urls.length)
+                    ? (urls[idx].split('/').last)
+                    : 'Downloading...';
               }
-
-              if (task == null || task.meta.res == null) {
-                // Couldn't get metadata — resume the Go task and fall through
-                try { await continueTask(taskId); } catch (_) {}
-                continue;
-              }
-
-              // Resolve the actual download URL — use per-file req if present,
-              // otherwise fall back to the top-level request URL
-              final res = task.meta.res!;
-              final fileInfo = res.files.isNotEmpty ? res.files[0] : null;
-              final downloadUrl = fileInfo?.req?.url ?? task.meta.req.url;
-
-              // Resolve save path exactly as the Go engine would
-              final filename = task.name;
-              final savePath = path.join(
-                task.meta.opts.path,
-                fileInfo?.path ?? '',
-                opt.name.isNotEmpty ? opt.name : filename,
-              );
-
-              // Collect headers from the request
-              final reqExtra = task.meta.req.extra;
-              Map<String, String> headers = {};
-              if (reqExtra != null) {
-                try {
-                  headers = ReqExtraHttp
-                      .fromJson(jsonDecode(jsonEncode(reqExtra)))
-                      .header ?? {};
-                } catch (_) {}
-              }
-
-              await IosBackgroundDownloadService.instance.startDownload(
+              await IosBackgroundDownloadService.instance.registerDownload(
                 id: taskId,
-                url: downloadUrl,
                 filename: filename,
-                destPath: savePath,
-                headers: headers,
-                onProgress: (progress, downloaded, total) {
-                  Get.find<IosDownloadProgressBus>()
-                      .emit(taskId, progress, downloaded, total);
-                },
-                onComplete: (error) async {
-                  // Step 4: remove Go engine task — file is already on disk
-                  if (error == null) {
-                    try { await deleteTask(taskId, false); } catch (_) {}
-                  } else {
-                    // Download failed — resume Go task so user can retry
-                    try { await continueTask(taskId); } catch (_) {}
-                  }
-                  Get.find<IosDownloadProgressBus>().emitDone(taskId, error);
-                },
               );
             }
           }
