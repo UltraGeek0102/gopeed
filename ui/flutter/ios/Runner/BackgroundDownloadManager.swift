@@ -11,8 +11,8 @@ class BackgroundDownloadManager: NSObject {
 
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.background(withIdentifier: sessionIdentifier)
-        config.isDiscretionary = false          // start immediately, not deferred
-        config.sessionSendsLaunchEvents = true  // wake app when done
+        config.isDiscretionary = false
+        config.sessionSendsLaunchEvents = true
         config.allowsCellularAccess = true
         config.httpMaximumConnectionsPerHost = 4
         return URLSession(configuration: config, delegate: self, delegateQueue: nil)
@@ -20,22 +20,28 @@ class BackgroundDownloadManager: NSObject {
 
     // taskIdentifier → gopeed download id
     private var taskIdMap: [Int: String] = [:]
-    // gopeed download id → progress callback (only active while app is running)
+    // gopeed download id → display filename (for Live Activity)
+    private var filenameMap: [String: String] = [:]
+    // gopeed download id → progress callback (only active while app is foreground)
     private var progressHandlers: [String: (Double, Int64, Int64) -> Void] = [:]
     // gopeed download id → completion callback
     private var completionHandlers: [String: (Error?) -> Void] = [:]
     // Set by AppDelegate when OS wakes the app for a background session event
     var backgroundCompletionHandler: (() -> Void)?
+    // Track whether Live Activity has been started for each id
+    private var liveActivityStarted: Set<String> = []
 
     private let lock = NSLock()
 
     private override init() {
         super.init()
-        // Rehydrate taskIdMap from UserDefaults so it survives app restarts
         if let saved = UserDefaults.standard.dictionary(forKey: "bgdl_taskmap") as? [String: Int] {
             for (downloadId, taskId) in saved {
                 taskIdMap[taskId] = downloadId
             }
+        }
+        if let saved = UserDefaults.standard.dictionary(forKey: "bgdl_filenames") as? [String: String] {
+            filenameMap = saved
         }
     }
 
@@ -44,6 +50,7 @@ class BackgroundDownloadManager: NSObject {
     func startDownload(
         id: String,
         url: String,
+        filename: String,
         headers: [String: String],
         destPath: String,
         onProgress: @escaping (Double, Int64, Int64) -> Void,
@@ -55,17 +62,18 @@ class BackgroundDownloadManager: NSObject {
             return
         }
 
-        // Persist destination so the delegate can find it after a relaunch
         UserDefaults.standard.set(destPath, forKey: "bgdl_dest_\(id)")
 
-        var request = URLRequest(url: downloadURL)
-        request.timeoutInterval = 0  // no timeout for background sessions
-        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
-
         lock.lock()
+        filenameMap[id] = filename
+        persistFilenameMap()
         progressHandlers[id] = onProgress
         completionHandlers[id] = onComplete
         lock.unlock()
+
+        var request = URLRequest(url: downloadURL)
+        request.timeoutInterval = 0
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
 
         let task = session.downloadTask(with: request)
         lock.lock()
@@ -77,8 +85,8 @@ class BackgroundDownloadManager: NSObject {
     }
 
     func pauseDownload(id: String) {
-        findTask(for: id) { task in
-            task?.cancel(byProducingResumeData: { [weak self] resumeData in
+        findTask(for: id) { [weak self] task in
+            task?.cancel(byProducingResumeData: { resumeData in
                 if let data = resumeData {
                     UserDefaults.standard.set(data, forKey: "bgdl_resume_\(id)")
                 }
@@ -111,7 +119,6 @@ class BackgroundDownloadManager: NSObject {
             UserDefaults.standard.removeObject(forKey: "bgdl_resume_\(id)")
             task.resume()
         } else {
-            // No resume data → restart from scratch using stored URL (not ideal but safe)
             onComplete(NSError(domain: "com.gopeed", code: -2,
                                userInfo: [NSLocalizedDescriptionKey: "No resume data for \(id)"]))
         }
@@ -127,13 +134,15 @@ class BackgroundDownloadManager: NSObject {
             }
             self?.progressHandlers.removeValue(forKey: id)
             self?.completionHandlers.removeValue(forKey: id)
+            self?.filenameMap.removeValue(forKey: id)
+            self?.persistFilenameMap()
+            self?.liveActivityStarted.remove(id)
             self?.lock.unlock()
             UserDefaults.standard.removeObject(forKey: "bgdl_dest_\(id)")
             UserDefaults.standard.removeObject(forKey: "bgdl_resume_\(id)")
         }
     }
 
-    /// Re-attach callbacks to an existing in-flight task (e.g. after app foregrounded)
     func reattach(
         id: String,
         onProgress: @escaping (Double, Int64, Int64) -> Void,
@@ -151,17 +160,18 @@ class BackgroundDownloadManager: NSObject {
         lock.lock()
         let taskId = taskIdMap.first(where: { $0.value == id })?.key
         lock.unlock()
-
         session.getTasksWithCompletionHandler { _, _, downloadTasks in
-            let found = downloadTasks.first(where: { $0.taskIdentifier == taskId })
-            completion(found)
+            completion(downloadTasks.first(where: { $0.taskIdentifier == taskId }))
         }
     }
 
     private func persistTaskMap() {
-        // Invert for storage: downloadId → taskId
         let inverted = Dictionary(uniqueKeysWithValues: taskIdMap.map { ($1, $0) })
         UserDefaults.standard.set(inverted, forKey: "bgdl_taskmap")
+    }
+
+    private func persistFilenameMap() {
+        UserDefaults.standard.set(filenameMap, forKey: "bgdl_filenames")
     }
 }
 
@@ -179,6 +189,11 @@ extension BackgroundDownloadManager: URLSessionDownloadDelegate {
         lock.lock()
         let id = taskIdMap[downloadTask.taskIdentifier]
         let handler = id.flatMap { progressHandlers[$0] }
+        let filename = id.flatMap { filenameMap[$0] } ?? "Downloading..."
+        let needsStart = id.map { !liveActivityStarted.contains($0) } ?? false
+        if let downloadId = id, needsStart {
+            liveActivityStarted.insert(downloadId)
+        }
         lock.unlock()
 
         guard let downloadId = id else { return }
@@ -188,6 +203,11 @@ extension BackgroundDownloadManager: URLSessionDownloadDelegate {
             : 0.0
 
         DispatchQueue.main.async {
+            // Start Live Activity on first data received — this is when we know
+            // the download is actually running, not just queued
+            if needsStart {
+                LiveActivityBridge.shared.start(id: downloadId, filename: filename)
+            }
             handler?(progress, totalBytesWritten, totalBytesExpectedToWrite)
             LiveActivityBridge.shared.update(
                 id: downloadId,
@@ -209,7 +229,6 @@ extension BackgroundDownloadManager: URLSessionDownloadDelegate {
 
         guard let downloadId = id else { return }
 
-        // Move the temp file to the final destination
         if let destPath = UserDefaults.standard.string(forKey: "bgdl_dest_\(downloadId)") {
             let destURL = URL(fileURLWithPath: destPath)
             do {
@@ -218,23 +237,17 @@ extension BackgroundDownloadManager: URLSessionDownloadDelegate {
                     withIntermediateDirectories: true,
                     attributes: nil
                 )
-                // Remove existing file if present
                 if FileManager.default.fileExists(atPath: destURL.path) {
                     try FileManager.default.removeItem(at: destURL)
                 }
                 try FileManager.default.moveItem(at: location, to: destURL)
             } catch {
-                // Move failed: leave it in the temp location and report error
-                DispatchQueue.main.async {
-                    self.fireComplete(id: downloadId, error: error)
-                }
+                DispatchQueue.main.async { self.fireComplete(id: downloadId, error: error) }
                 return
             }
         }
 
-        DispatchQueue.main.async {
-            self.fireComplete(id: downloadId, error: nil)
-        }
+        DispatchQueue.main.async { self.fireComplete(id: downloadId, error: nil) }
     }
 
     func urlSession(
@@ -242,10 +255,7 @@ extension BackgroundDownloadManager: URLSessionDownloadDelegate {
         task: URLSessionTask,
         didCompleteWithError error: Error?
     ) {
-        // Only handle actual errors here; success is handled in didFinishDownloadingTo
         guard let error = error else { return }
-
-        // Cancelled tasks (pause) are NSURLErrorCancelled – ignore them
         let nsErr = error as NSError
         if nsErr.domain == NSURLErrorDomain && nsErr.code == NSURLErrorCancelled { return }
 
@@ -254,13 +264,9 @@ extension BackgroundDownloadManager: URLSessionDownloadDelegate {
         lock.unlock()
 
         guard let downloadId = id else { return }
-
-        DispatchQueue.main.async {
-            self.fireComplete(id: downloadId, error: error)
-        }
+        DispatchQueue.main.async { self.fireComplete(id: downloadId, error: error) }
     }
 
-    // Called by iOS when ALL background tasks for this session have finished
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         DispatchQueue.main.async {
             self.backgroundCompletionHandler?()
@@ -268,20 +274,19 @@ extension BackgroundDownloadManager: URLSessionDownloadDelegate {
         }
     }
 
-    // MARK: - Internal helper
-
     private func fireComplete(id: String, error: Error?) {
         lock.lock()
         let handler = completionHandlers[id]
-        // Clean up maps
         taskIdMap = taskIdMap.filter { $0.value != id }
         persistTaskMap()
         progressHandlers.removeValue(forKey: id)
         completionHandlers.removeValue(forKey: id)
+        filenameMap.removeValue(forKey: id)
+        persistFilenameMap()
+        liveActivityStarted.remove(id)
         lock.unlock()
 
         UserDefaults.standard.removeObject(forKey: "bgdl_dest_\(id)")
-
         LiveActivityBridge.shared.end(id: id, success: error == nil)
         handler?(error)
     }
