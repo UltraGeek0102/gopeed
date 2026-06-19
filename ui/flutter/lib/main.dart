@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:args/args.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -12,6 +14,7 @@ import 'api/api.dart' as api;
 import 'app/modules/app/controllers/app_controller.dart';
 import 'app/rpc/webview_rpc_service.dart';
 import 'app/modules/app/views/app_view.dart';
+import 'core/ios_background_download_service.dart';
 import 'core/libgopeed_boot.dart';
 import 'database/database.dart';
 import 'i18n/message.dart';
@@ -116,6 +119,14 @@ Future<void> init(StartupArgs args) async {
     }
     controller.runningPort.value = await LibgopeedBoot.instance.start(startCfg);
     api.init(startCfg.network, controller.runningAddress(), startCfg.apiToken);
+    // Tell native Swift the Go engine's TCP port so the background polling
+    // timer can call /api/v1/tasks directly without Flutter.
+    if (Platform.isIOS) {
+      await IosBackgroundDownloadService.instance.configureGoEngine(
+        port: controller.runningPort.value,
+        apiToken: startCfg.apiToken,
+      );
+    }
   } catch (e) {
     logger.e("libgopeed init fail", e);
   }
