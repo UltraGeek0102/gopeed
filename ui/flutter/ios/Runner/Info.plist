@@ -30,8 +30,8 @@
 		<!-- remote-notification: required for push-to-update Live Acts   -->
 		<key>UIBackgroundModes</key>
 		<array>
+			<string>audio</string>
 			<string>fetch</string>
-			<string>remote-notification</string>
 			<string>processing</string>
 		</array>
 
