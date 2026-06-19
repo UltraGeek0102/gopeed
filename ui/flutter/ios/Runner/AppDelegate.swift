@@ -13,22 +13,25 @@ import Libgopeed
     ) -> Bool {
         let controller = window?.rootViewController as! FlutterViewController
 
-        // ── Existing libgopeed channel ────────────────────────────────────────
+        // ── Libgopeed channel (unchanged) ─────────────────────────────────────
         let gopeedChannel = FlutterMethodChannel(
             name: "gopeed.com/libgopeed",
             binaryMessenger: controller.binaryMessenger
         )
-        gopeedChannel.setMethodCallHandler({ (call, result) in
+        gopeedChannel.setMethodCallHandler { (call, result) in
             switch call.method {
             case "start":
-                let args = call.arguments as? Dictionary<String, Any>
+                let args = call.arguments as? [String: Any]
                 let cfg = args?["cfg"] as? String
-                let portPrt = UnsafeMutablePointer<Int>.allocate(capacity: MemoryLayout<Int>.stride)
+                let portPtr = UnsafeMutablePointer<Int>.allocate(
+                    capacity: MemoryLayout<Int>.stride)
                 var error: NSError?
-                if LibgopeedStart(cfg, portPrt, &error) {
-                    result(portPrt.pointee)
+                if LibgopeedStart(cfg, portPtr, &error) {
+                    result(portPtr.pointee)
                 } else {
-                    result(FlutterError(code: "ERROR", message: error.debugDescription, details: nil))
+                    result(FlutterError(code: "ERROR",
+                                        message: error.debugDescription,
+                                        details: nil))
                 }
             case "stop":
                 LibgopeedStop()
@@ -36,29 +39,27 @@ import Libgopeed
             default:
                 result(FlutterMethodNotImplemented)
             }
-        })
+        }
 
-        // ── Background download channel ───────────────────────────────────────
-        // This channel does NOT handle the actual HTTP download — the Go engine does.
-        // It manages the keep-alive (AVAudioSession + BGTask) and Live Activities.
+        // ── Background download / Live Activity channel ────────────────────────
         bgChannel = FlutterMethodChannel(
             name: "gopeed.com/background_download",
             binaryMessenger: controller.binaryMessenger
         )
-        bgChannel?.setMethodCallHandler({ [weak self] (call, result) in
-            self?.handleBgDownload(call: call, result: result)
-        })
+        bgChannel?.setMethodCallHandler { [weak self] call, result in
+            self?.handleBackground(call: call, result: result)
+        }
 
         GeneratedPluginRegistrant.register(with: self)
         SwiftFlutterForegroundTaskPlugin.setPluginRegistrantCallback(registerPlugins)
         if #available(iOS 10.0, *) {
-            UNUserNotificationCenter.current().delegate = self as? UNUserNotificationCenterDelegate
+            UNUserNotificationCenter.current().delegate =
+                self as? UNUserNotificationCenterDelegate
         }
-
         return super.application(application, didFinishLaunchingWithOptions: launchOptions)
     }
 
-    // ── App lifecycle → keep-alive ────────────────────────────────────────────
+    // ── Lifecycle ──────────────────────────────────────────────────────────────
 
     override func applicationDidEnterBackground(_ application: UIApplication) {
         super.applicationDidEnterBackground(application)
@@ -70,81 +71,77 @@ import Libgopeed
         BackgroundDownloadManager.shared.applicationWillEnterForeground()
     }
 
-    // ── Method channel handler ────────────────────────────────────────────────
+    // ── Channel handler ────────────────────────────────────────────────────────
 
-    private func handleBgDownload(call: FlutterMethodCall, result: @escaping FlutterResult) {
+    private func handleBackground(call: FlutterMethodCall, result: @escaping FlutterResult) {
         let args = call.arguments as? [String: Any] ?? [:]
 
         switch call.method {
 
+        case "configureGoEngine":
+            // Called once by Flutter after the Go engine starts,
+            // so Swift knows the port for native TCP polling.
+            let port     = args["port"]     as? Int    ?? 0
+            let apiToken = args["apiToken"] as? String ?? ""
+            BackgroundDownloadManager.shared.configure(port: port, apiToken: apiToken)
+            result(nil)
+
         case "registerDownload":
-            // Called by Flutter when a download task starts.
-            // The Go engine does the actual HTTP work.
-            // We register here to: track active downloads, start keep-alive, start Live Activity.
             guard
                 let id       = args["id"]       as? String,
                 let filename = args["filename"]  as? String
             else {
                 result(FlutterError(code: "INVALID_ARGS",
-                                    message: "registerDownload requires id and filename",
-                                    details: nil))
+                                    message: "id and filename required", details: nil))
                 return
             }
-
             BackgroundDownloadManager.shared.registerDownload(
-                id: id,
-                filename: filename,
-                onProgress: { [weak self] progress, downloaded, total in
+                id: id, filename: filename,
+                onProgress: { [weak self] p, dl, total in
                     self?.bgChannel?.invokeMethod("onProgress", arguments: [
-                        "id": id, "progress": progress,
-                        "downloaded": downloaded, "total": total
+                        "id": id, "progress": p, "downloaded": dl, "total": total
                     ])
                 },
                 onComplete: { [weak self] error in
                     self?.bgChannel?.invokeMethod("onComplete", arguments: [
-                        "id": id,
-                        "error": error?.localizedDescription as Any
+                        "id": id, "error": error?.localizedDescription as Any
                     ])
                 }
             )
             result(nil)
 
         case "updateProgress":
-            // Flutter/Go engine sends progress updates → we forward to Live Activity
-            guard let id = args["id"] as? String else { result(nil); return }
-            let progress   = (args["progress"]   as? Double) ?? 0.0
-            let downloaded = (args["downloaded"] as? Int64)  ?? 0
-            let total      = (args["total"]      as? Int64)  ?? 0
+            let id         = args["id"]         as? String ?? ""
+            let progress   = args["progress"]   as? Double ?? 0.0
+            let downloaded = (args["downloaded"] as? Int64) ?? Int64((args["downloaded"] as? Int) ?? 0)
+            let total      = (args["total"]      as? Int64) ?? Int64((args["total"]      as? Int) ?? 0)
             BackgroundDownloadManager.shared.updateProgress(
                 id: id, progress: progress, downloaded: downloaded, total: total)
             result(nil)
 
         case "completeDownload":
-            // Called when Go engine finishes (success or error)
-            guard let id = args["id"] as? String else { result(nil); return }
-            let errorMsg = args["error"] as? String
-            BackgroundDownloadManager.shared.completeDownload(id: id, errorMessage: errorMsg)
+            let id  = args["id"]    as? String ?? ""
+            let err = args["error"] as? String
+            BackgroundDownloadManager.shared.completeDownload(id: id, errorMessage: err)
             result(nil)
 
         case "cancelDownload":
-            guard let id = args["id"] as? String else { result(nil); return }
+            let id = args["id"] as? String ?? ""
             BackgroundDownloadManager.shared.cancelDownload(id: id)
             result(nil)
 
         case "reattach":
-            guard let id = args["id"] as? String else { result(nil); return }
+            let id = args["id"] as? String ?? ""
             BackgroundDownloadManager.shared.reattach(
                 id: id,
-                onProgress: { [weak self] progress, downloaded, total in
+                onProgress: { [weak self] p, dl, total in
                     self?.bgChannel?.invokeMethod("onProgress", arguments: [
-                        "id": id, "progress": progress,
-                        "downloaded": downloaded, "total": total
+                        "id": id, "progress": p, "downloaded": dl, "total": total
                     ])
                 },
                 onComplete: { [weak self] error in
                     self?.bgChannel?.invokeMethod("onComplete", arguments: [
-                        "id": id,
-                        "error": error?.localizedDescription as Any
+                        "id": id, "error": error?.localizedDescription as Any
                     ])
                 }
             )
