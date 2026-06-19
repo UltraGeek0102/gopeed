@@ -40,6 +40,9 @@ private class LiveActivityManager {
     private var lastBytes: [String: Int64] = [:]
     private var lastTime: [String: Date] = [:]
 
+    private var lastUpdateTime: [String: Date] = [:]
+    private var lastReportedProgress: [String: Double] = [:]
+
     func start(id: String, filename: String) {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
 
@@ -73,27 +76,47 @@ private class LiveActivityManager {
     }
 
     func update(id: String, progress: Double, downloaded: Int64, total: Int64) {
-        guard let activity = activities[id] else { return }
 
-        let now = Date()
-        let elapsed = now.timeIntervalSince(lastTime[id] ?? now)
-        let delta = downloaded - (lastBytes[id] ?? 0)
-        let speed: Int64 = elapsed > 0.5 ? Int64(Double(delta) / elapsed) : 0
+    guard let activity = activities[id] else { return }
 
-        lastBytes[id] = downloaded
-        lastTime[id] = now
+    let now = Date()
 
-        let updatedState = DownloadActivityAttributes.ContentState(
-            progress: min(max(progress, 0), 1),
-            downloadedBytes: downloaded,
-            totalBytes: total,
-            speedBytesPerSec: max(speed, 0),
-            statusLabel: "Downloading"
-        )
+    // Only update every 5 seconds
+    // Skip only if BOTH conditions are true
+    if let last = lastUpdateTime[id],
+       let prev = lastReportedProgress[id],
+       now.timeIntervalSince(last) < 5 &&
+       abs(progress - prev) < 0.02 {
+        return
+    }
 
-        Task {
-            await activity.update(
-                ActivityContent(state: updatedState, staleDate: nil)
+    lastUpdateTime[id] = now
+    lastReportedProgress[id] = progress
+
+    let elapsed = now.timeIntervalSince(lastTime[id] ?? now)
+    let delta = downloaded - (lastBytes[id] ?? 0)
+
+    let speed: Int64 =
+        elapsed > 0.5
+        ? Int64(Double(delta) / elapsed)
+        : 0
+
+    lastBytes[id] = downloaded
+    lastTime[id] = now
+
+    let updatedState = DownloadActivityAttributes.ContentState(
+        progress: min(max(progress, 0), 1),
+        downloadedBytes: downloaded,
+        totalBytes: total,
+        speedBytesPerSec: max(speed, 0),
+        statusLabel: "Downloading"
+    )
+
+    Task {
+        await activity.update(
+            ActivityContent(
+                state: updatedState,
+                staleDate: Date().addingTimeInterval(60))
             )
         }
     }
@@ -119,5 +142,8 @@ private class LiveActivityManager {
         activities.removeValue(forKey: id)
         lastBytes.removeValue(forKey: id)
         lastTime.removeValue(forKey: id)
+        
+        lastUpdateTime.removeValue(forKey: id)
+        lastReportedProgress.removeValue(forKey: id)
     }
 }
