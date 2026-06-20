@@ -25,40 +25,20 @@ class BackgroundDownloadManager: NSObject {
     private var progressHandlers: [String: (Double, Int64, Int64) -> Void] = [:]
     private var completionHandlers: [String: (Error?) -> Void] = [:]
 
-    // MARK: - Keep-alive
+    // MARK: - Keep-alive resources
 
     private var bgTaskId: UIBackgroundTaskIdentifier = .invalid
     private var audioPlayer: AVAudioPlayer?
-    // Dedicated background queue — not main thread, not suspended by iOS when backgrounded
-    private let pollQueue = DispatchQueue(label: "com.gopeed.bgpoll", qos: .utility)
-    private var pollWorkItem: DispatchWorkItem?
+    private let pollQueue = DispatchQueue(label: "com.gopeed.bgpoll", qos: .userInitiated)
     private var isPolling = false
-
-    // URLSession with .default config — ephemeral gets suspended in background
-    private lazy var httpSession: URLSession = {
-        let cfg = URLSessionConfiguration.default
-        cfg.timeoutIntervalForRequest = 3
-        cfg.timeoutIntervalForResource = 3
-        cfg.waitsForConnectivity = false
-        return URLSession(configuration: cfg)
-    }()
+    private var pollShouldStop = false
 
     private override init() {
         super.init()
         setupAudioSession()
-        // Observe audio session interruptions so we can restart after phone calls etc.
         NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleAudioInterruption(_:)),
-            name: AVAudioSession.interruptionNotification,
-            object: nil
-        )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleAudioRouteChange(_:)),
-            name: AVAudioSession.routeChangeNotification,
-            object: nil
-        )
+            self, selector: #selector(audioInterrupted(_:)),
+            name: AVAudioSession.interruptionNotification, object: nil)
     }
 
     // MARK: - AVAudioSession
@@ -66,54 +46,45 @@ class BackgroundDownloadManager: NSObject {
     private func setupAudioSession() {
         do {
             try AVAudioSession.sharedInstance().setCategory(
-                .playback,
-                mode: .default,
-                options: [.mixWithOthers]  // don't duck others, just mix silently
-            )
+                .playback, mode: .default, options: [.mixWithOthers])
             try AVAudioSession.sharedInstance().setActive(true)
-        } catch {
-            print("[BgDL] AVAudioSession setup error: \(error)")
-        }
+        } catch { print("[BgDL] AVAudioSession error: \(error)") }
     }
 
     private func startSilentAudio() {
-        // Always recreate the player to ensure it's active after interruptions
         audioPlayer?.stop()
         audioPlayer = nil
+        do {
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch { print("[BgDL] setActive error: \(error)") }
 
-        // Build a minimal silent WAV
-        let sr = 44100, n = sr / 10, ds = n * 2
+        // 1-second silent WAV loop
+        let sr = 44100, ds = sr * 2
         var wav = Data(count: 44 + ds)
         wav.withUnsafeMutableBytes { ptr in
             guard let b = ptr.baseAddress else { return }
             let h: [UInt8] = [
                 0x52,0x49,0x46,0x46,
-                UInt8((ds+36)&0xFF), UInt8((ds+36)>>8&0xFF),
-                UInt8((ds+36)>>16&0xFF), UInt8((ds+36)>>24&0xFF),
-                0x57,0x41,0x56,0x45, 0x66,0x6D,0x74,0x20,
-                0x10,0x00,0x00,0x00, 0x01,0x00, 0x01,0x00,
-                0x44,0xAC,0x00,0x00, 0x88,0x58,0x01,0x00,
-                0x02,0x00, 0x10,0x00, 0x64,0x61,0x74,0x61,
-                UInt8(ds&0xFF), UInt8(ds>>8&0xFF),
-                UInt8(ds>>16&0xFF), UInt8(ds>>24&0xFF)
+                UInt8((ds+36)&0xFF),UInt8((ds+36)>>8&0xFF),
+                UInt8((ds+36)>>16&0xFF),UInt8((ds+36)>>24&0xFF),
+                0x57,0x41,0x56,0x45,0x66,0x6D,0x74,0x20,
+                0x10,0x00,0x00,0x00,0x01,0x00,0x01,0x00,
+                0x44,0xAC,0x00,0x00,0x88,0x58,0x01,0x00,
+                0x02,0x00,0x10,0x00,0x64,0x61,0x74,0x61,
+                UInt8(ds&0xFF),UInt8(ds>>8&0xFF),
+                UInt8(ds>>16&0xFF),UInt8(ds>>24&0xFF)
             ]
             h.enumerated().forEach {
                 b.storeBytes(of: $0.element, toByteOffset: $0.offset, as: UInt8.self)
             }
         }
-
         do {
-            // Re-activate session each time — iOS may have deactivated it
-            try AVAudioSession.sharedInstance().setActive(true)
             audioPlayer = try AVAudioPlayer(data: wav, fileTypeHint: AVFileType.wav.rawValue)
             audioPlayer?.numberOfLoops = -1
-            audioPlayer?.volume = 0.01  // Not truly 0 — iOS 15+ may ignore silent audio
-            audioPlayer?.prepareToPlay()
-            let started = audioPlayer?.play() ?? false
-            print("[BgDL] Audio player started: \(started)")
-        } catch {
-            print("[BgDL] AVAudioPlayer error: \(error)")
-        }
+            audioPlayer?.volume = 0.01
+            let ok = audioPlayer?.play() ?? false
+            print("[BgDL] Audio started: \(ok)")
+        } catch { print("[BgDL] AVAudioPlayer error: \(error)") }
     }
 
     private func stopSilentAudio() {
@@ -121,56 +92,28 @@ class BackgroundDownloadManager: NSObject {
         audioPlayer = nil
     }
 
-    @objc private func handleAudioInterruption(_ notification: Notification) {
-        guard let info = notification.userInfo,
-              let typeValue = info[AVAudioSessionInterruptionTypeKey] as? UInt,
-              let type = AVAudioSession.InterruptionType(rawValue: typeValue)
+    @objc private func audioInterrupted(_ n: Notification) {
+        guard
+            let v = n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+            let t = AVAudioSession.InterruptionType(rawValue: v),
+            t == .ended
         else { return }
-
-        if type == .ended {
-            // Interruption ended (e.g. phone call finished) — restart audio
-            lock.lock()
-            let hasActive = !activeIds.isEmpty
-            lock.unlock()
-            if hasActive {
-                print("[BgDL] Audio interruption ended — restarting")
-                startSilentAudio()
-            }
-        }
+        lock.lock(); let has = !activeIds.isEmpty; lock.unlock()
+        if has { startSilentAudio() }
     }
 
-    @objc private func handleAudioRouteChange(_ notification: Notification) {
-        guard let info = notification.userInfo,
-              let reasonValue = info[AVAudioSessionRouteChangeReasonKey] as? UInt,
-              let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue)
-        else { return }
-
-        // Headphones unplugged etc — restart if needed
-        if reason == .oldDeviceUnavailable || reason == .categoryChange {
-            lock.lock()
-            let hasActive = !activeIds.isEmpty
-            lock.unlock()
-            if hasActive && audioPlayer?.isPlaying != true {
-                print("[BgDL] Audio route changed — restarting audio")
-                startSilentAudio()
-            }
-        }
-    }
-
-    // MARK: - Background task token
+    // MARK: - Background task
 
     private func beginBgTask() {
-        // Always end any existing one first, then create a fresh one
         if bgTaskId != .invalid {
             UIApplication.shared.endBackgroundTask(bgTaskId)
             bgTaskId = .invalid
         }
-        bgTaskId = UIApplication.shared.beginBackgroundTask(withName: "gopeed.dl") {
-            // Expiry — audio session should take over, but renew the token anyway
+        bgTaskId = UIApplication.shared.beginBackgroundTask(withName: "gopeed.dl") { [weak self] in
+            guard let self = self else { return }
             UIApplication.shared.endBackgroundTask(self.bgTaskId)
             self.bgTaskId = .invalid
-            // Immediately try to grab a new one
-            self.beginBgTask()
+            self.beginBgTask() // immediately renew
         }
     }
 
@@ -180,73 +123,130 @@ class BackgroundDownloadManager: NSObject {
         bgTaskId = .invalid
     }
 
-    // MARK: - Poll timer on background DispatchQueue
-    // Using a DispatchQueue with recursive rescheduling instead of Timer/RunLoop.
-    // DispatchQueue.asyncAfter on a background queue fires regardless of main
-    // thread sleep state, as long as the process itself is alive.
+    // MARK: - Polling using raw POSIX sockets
+    // URLSession can be suspended when backgrounded even with audio session.
+    // Raw POSIX TCP to 127.0.0.1 is just memory — it CANNOT be suspended.
 
     private func startPolling() {
         guard !isPolling else { return }
         isPolling = true
-        scheduleNextPoll()
-        print("[BgDL] Polling started on background queue")
+        pollShouldStop = false
+        pollQueue.async { [weak self] in self?.pollLoop() }
+        print("[BgDL] Poll loop started")
     }
 
     private func stopPolling() {
+        pollShouldStop = true
         isPolling = false
-        pollWorkItem?.cancel()
-        pollWorkItem = nil
-        print("[BgDL] Polling stopped")
+        print("[BgDL] Poll loop stopping")
     }
 
-    private func scheduleNextPoll() {
-        guard isPolling else { return }
-        let item = DispatchWorkItem { [weak self] in
-            guard let self = self, self.isPolling else { return }
-            self.pollGoEngine()
-            // Reschedule immediately after completion (not after 1s from now)
-            // so polls don't stack up if network is slow
-            self.pollQueue.asyncAfter(deadline: .now() + 1.0) {
-                self.scheduleNextPoll()
+    private func pollLoop() {
+        while !pollShouldStop {
+            lock.lock(); let has = !activeIds.isEmpty; let port = goPort; lock.unlock()
+            if has && port > 0 { doPoll(port: port) }
+            // Sleep 1 second between polls using POSIX select (not suspendable)
+            var tv = timeval(tv_sec: 1, tv_usec: 0)
+            select(0, nil, nil, nil, &tv)
+        }
+        isPolling = false
+        print("[BgDL] Poll loop exited")
+    }
+
+    /// Makes a raw HTTP/1.1 GET request over a POSIX TCP socket.
+    /// This bypasses URLSession entirely and cannot be suspended by iOS.
+    private func doPoll(port: Int) {
+        let path = "/api/v1/tasks?status=running"
+        guard let data = rawHttpGet(host: "127.0.0.1", port: port,
+                                    path: path, token: apiToken)
+        else { return }
+        processPollData(data)
+    }
+
+    private func rawHttpGet(host: String, port: Int, path: String, token: String) -> Data? {
+        // Create TCP socket
+        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        guard sock >= 0 else { return nil }
+        defer { close(sock) }
+
+        // Set short timeouts so we don't block the poll loop
+        var tv = timeval(tv_sec: 2, tv_usec: 0)
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+        // Connect to 127.0.0.1:port
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(port).bigEndian
+        inet_pton(AF_INET, host, &addr.sin_addr)
+
+        let connected = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(sock, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        pollWorkItem = item
-        pollQueue.asyncAfter(deadline: .now() + 1.0, execute: item)
+        guard connected == 0 else { return nil }
+
+        // Build HTTP request
+        var req = "GET \(path) HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nAccept: application/json\r\nConnection: close\r\n"
+        if !token.isEmpty { req += "X-Api-Token: \(token)\r\n" }
+        req += "\r\n"
+
+        // Send
+        let reqBytes = Array(req.utf8)
+        let sent = reqBytes.withUnsafeBytes { send(sock, $0.baseAddress, reqBytes.count, 0) }
+        guard sent > 0 else { return nil }
+
+        // Read response
+        var response = Data()
+        var buf = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let n = recv(sock, &buf, buf.count, 0)
+            if n <= 0 { break }
+            response.append(contentsOf: buf[0..<n])
+            if response.count > 512 * 1024 { break } // safety cap 512KB
+        }
+
+        // Strip HTTP headers — find \r\n\r\n
+        guard let bodyStart = response.range(of: Data([0x0D,0x0A,0x0D,0x0A])) else { return nil }
+        let body = response[bodyStart.upperBound...]
+
+        // Handle chunked transfer encoding
+        if response.range(of: Data("Transfer-Encoding: chunked".utf8)) != nil {
+            return dechunk(Data(body))
+        }
+        return Data(body)
     }
 
-    private func pollGoEngine() {
-        lock.lock()
-        let hasActive = !activeIds.isEmpty
-        let port = goPort
-        lock.unlock()
-        guard hasActive, port > 0 else { return }
-
-        guard let url = URL(string: "http://127.0.0.1:\(port)/api/v1/tasks?status=running") else { return }
-        var req = URLRequest(url: url)
-        req.setValue("application/json", forHTTPHeaderField: "Accept")
-        if !apiToken.isEmpty { req.setValue(apiToken, forHTTPHeaderField: "X-Api-Token") }
-
-        // Synchronous-style using semaphore so we know when it's done before rescheduling
-        let sem = DispatchSemaphore(value: 0)
-        httpSession.dataTask(with: req) { [weak self] data, _, error in
-            defer { sem.signal() }
-            guard let self = self, let data = data, error == nil else { return }
-            self.processPollData(data)
-        }.resume()
-        // Wait max 2.5s for response (fits within 3s timeout)
-        _ = sem.wait(timeout: .now() + 2.5)
+    /// Minimal chunked transfer encoding decoder
+    private func dechunk(_ data: Data) -> Data {
+        var result = Data()
+        var i = data.startIndex
+        while i < data.endIndex {
+            // Read chunk size line
+            guard let lineEnd = data[i...].range(of: Data([0x0D,0x0A])) else { break }
+            let sizeLine = String(data: data[i..<lineEnd.lowerBound], encoding: .utf8) ?? "0"
+            let chunkSize = Int(sizeLine.trimmingCharacters(in: .whitespaces), radix: 16) ?? 0
+            if chunkSize == 0 { break }
+            i = lineEnd.upperBound
+            guard i + chunkSize <= data.endIndex else { break }
+            result.append(data[i..<data.index(i, offsetBy: chunkSize)])
+            i = data.index(i, offsetBy: chunkSize + 2) // skip trailing \r\n
+        }
+        return result
     }
 
     private func processPollData(_ data: Data) {
         guard
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let arr  = json["data"] as? [[String: Any]]
-        else { return }
+        else {
+            // Log raw for debugging
+            print("[BgDL] poll parse fail, raw: \(String(data: data.prefix(200), encoding: .utf8) ?? "?")")
+            return
+        }
 
-        lock.lock()
-        let active = activeIds
-        lock.unlock()
-
+        lock.lock(); let active = activeIds; lock.unlock()
         let seen = Set(arr.compactMap { $0["id"] as? String })
 
         for t in arr {
@@ -261,56 +261,33 @@ class BackgroundDownloadManager: NSObject {
             let total = (res?["size"] as? Int64) ?? Int64((res?["size"] as? Int) ?? 0)
             let frac  = total > 0 ? Double(dl) / Double(total) : 0.0
 
-            // Call LiveActivityBridge directly from poll queue — no main thread needed
-            // LiveActivityBridge uses Task{} which is concurrency-safe
+            print("[BgDL] poll \(id) \(String(format:"%.1f",frac*100))% dl=\(dl)/\(total)")
+
             LiveActivityBridge.shared.update(id: id, progress: frac, downloaded: dl, total: total)
 
-            lock.lock()
-            let h = progressHandlers[id]
-            lock.unlock()
-            // Forward to Flutter only if handler exists (foreground only)
-            if let h = h {
-                DispatchQueue.main.async { h(frac, dl, total) }
-            }
+            lock.lock(); let h = progressHandlers[id]; lock.unlock()
+            if let h = h { DispatchQueue.main.async { h(frac, dl, total) } }
         }
 
-        // Detect completions
-        for id in active.subtracting(seen) {
-            verifyCompleted(id: id)
-        }
+        for id in active.subtracting(seen) { verifyAndFinish(id: id) }
     }
 
-    private func verifyCompleted(id: String) {
-        lock.lock()
-        let port = goPort
-        lock.unlock()
+    private func verifyAndFinish(id: String) {
+        lock.lock(); let port = goPort; lock.unlock()
         guard port > 0,
-              let url = URL(string: "http://127.0.0.1:\(port)/api/v1/tasks/\(id)")
+              let data = rawHttpGet(host: "127.0.0.1", port: port,
+                                    path: "/api/v1/tasks/\(id)", token: apiToken),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let task = json["data"] as? [String: Any]
         else { return }
 
-        var req = URLRequest(url: url)
-        if !apiToken.isEmpty { req.setValue(apiToken, forHTTPHeaderField: "X-Api-Token") }
+        let s: Int
+        if let n = task["status"] as? Int { s = n }
+        else if let str = task["status"] as? String, let n = Int(str) { s = n }
+        else { return }
 
-        let sem = DispatchSemaphore(value: 0)
-        httpSession.dataTask(with: req) { [weak self] data, _, _ in
-            defer { sem.signal() }
-            guard let self = self, let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let task = json["data"] as? [String: Any],
-                  let rawStatus = task["status"]
-            else { return }
-
-            let statusInt: Int
-            if let s = rawStatus as? Int { statusInt = s }
-            else if let s = rawStatus as? String, let i = Int(s) { statusInt = i }
-            else { return }
-
-            // 4=error 5=done
-            if statusInt == 5 || statusInt == 4 {
-                self.finishDownload(id: id, failed: statusInt == 4)
-            }
-        }.resume()
-        _ = sem.wait(timeout: .now() + 2.5)
+        if s == 5 { finishDownload(id: id, failed: false) }   // done
+        else if s == 4 { finishDownload(id: id, failed: true) } // error
     }
 
     // MARK: - Public API
@@ -342,39 +319,29 @@ class BackgroundDownloadManager: NSObject {
         finishDownload(id: id, failed: errorMessage != nil)
     }
 
-    func cancelDownload(id: String) {
-        finishDownload(id: id, failed: false)
-    }
+    func cancelDownload(id: String) { finishDownload(id: id, failed: false) }
 
     func reattach(id: String, onProgress: @escaping (Double, Int64, Int64) -> Void,
                   onComplete: @escaping (Error?) -> Void) {
-        lock.lock()
-        progressHandlers[id] = onProgress
-        completionHandlers[id] = onComplete
-        lock.unlock()
+        lock.lock(); progressHandlers[id] = onProgress; completionHandlers[id] = onComplete; lock.unlock()
     }
 
     private func finishDownload(id: String, failed: Bool) {
         lock.lock()
         let handler = completionHandlers[id]
-        activeIds.remove(id)
-        filenameMap.removeValue(forKey: id)
-        progressHandlers.removeValue(forKey: id)
-        completionHandlers.removeValue(forKey: id)
+        activeIds.remove(id); filenameMap.removeValue(forKey: id)
+        progressHandlers.removeValue(forKey: id); completionHandlers.removeValue(forKey: id)
         let remaining = activeIds.count
         lock.unlock()
 
-        let err: Error? = failed ? NSError(domain: "com.gopeed", code: -1,
-            userInfo: [NSLocalizedDescriptionKey: "Download failed"]) : nil
-        if let handler = handler {
-            DispatchQueue.main.async { handler(err) }
+        if let h = handler {
+            let err: Error? = failed ? NSError(domain: "com.gopeed", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Download failed"]) : nil
+            DispatchQueue.main.async { h(err) }
         }
         LiveActivityBridge.shared.end(id: id, success: !failed)
-
         if remaining == 0 {
-            stopPolling()
-            stopSilentAudio()
-            endBgTask()
+            stopPolling(); stopSilentAudio(); endBgTask()
             print("[BgDL] All downloads done")
         }
     }
@@ -382,22 +349,16 @@ class BackgroundDownloadManager: NSObject {
     // MARK: - App lifecycle
 
     func applicationDidEnterBackground() {
-        lock.lock()
-        let hasActive = !activeIds.isEmpty
-        lock.unlock()
-        guard hasActive else { return }
-
-        // Always refresh everything on background transition
-        beginBgTask()       // fresh BGTask token
-        startSilentAudio()  // always recreate player (in case of previous interruption)
-        startPolling()      // no-op if already polling
-        print("[BgDL] Did enter background — \(activeIds.count) active downloads")
+        lock.lock(); let has = !activeIds.isEmpty; lock.unlock()
+        guard has else { return }
+        beginBgTask()
+        startSilentAudio()
+        startPolling()
+        print("[BgDL] Entered background — \(activeIds.count) active")
     }
 
     func applicationWillEnterForeground() {
-        // Don't stop anything — downloads still running
-        // Just end the BGTask since foreground doesn't need it
         endBgTask()
-        print("[BgDL] Will enter foreground")
+        print("[BgDL] Entering foreground")
     }
 }
