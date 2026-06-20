@@ -38,7 +38,9 @@ private class LiveActivityManager {
         }
 
         if let existing = activities[id] {
-            existing.end(dismissalPolicy: .immediate)
+            Task.detached(priority: .utility) {
+                await existing.end(dismissalPolicy: .immediate)
+            }
         }
 
         let attrs = DownloadActivityAttributes(downloadId: id, filename: filename)
@@ -85,10 +87,8 @@ private class LiveActivityManager {
         // Do NOT throttle — let the caller (poll timer) control frequency.
         let content = ActivityContent(state: state, staleDate: nil)
         Task.detached(priority: .utility) {
-            do {
-                await activity.update(content)
-                print("[LiveActivity] updated \(id) progress=\(String(format: "%.1f", progress*100))%")
-            }
+            await activity.update(content)
+            print("[LiveActivity] updated \(id) progress=\(String(format: "%.1f", progress*100))%")
         }
     }
 
