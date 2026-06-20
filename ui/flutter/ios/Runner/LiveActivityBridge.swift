@@ -30,6 +30,9 @@ private class LiveActivityManager {
     private var activities: [String: Activity<DownloadActivityAttributes>] = [:]
     private var lastBytes: [String: Int64] = [:]
     private var lastTime: [String: Date] = [:]
+    
+    // Track the last time a background UI update was ACTUALLY pushed to iOS
+    private var lastBgWidgetUpdateTime: [String: Date] = [:]
 
     func start(id: String, filename: String) {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else {
@@ -67,12 +70,31 @@ private class LiveActivityManager {
         }
 
         let now = Date()
+        
+        // Check if the application is currently backgrounded
+        let isBackground = UIApplication.shared.applicationState != .active
+        
+        // Enforce a strict 10-second update limit ONLY if we are in the background.
+        if isBackground {
+            if let lastWidgetUpdate = lastBgWidgetUpdateTime[id], 
+               now.timeIntervalSince(lastWidgetUpdate) < 10.0 {
+                // Skip pushing to ActivityKit to preserve system update budget.
+                // We return immediately to avoid corrupting speed tracking data on dropped frames.
+                return
+            }
+        }
+
         let elapsed = now.timeIntervalSince(lastTime[id] ?? now)
         let delta = downloaded - (lastBytes[id] ?? 0)
         let speed: Int64 = elapsed > 0.1 ? Int64(Double(max(delta, 0)) / elapsed) : 0
 
         lastBytes[id] = downloaded
         lastTime[id] = now
+        
+        if isBackground {
+            // Log the exact execution timestamp of the permitted background update
+            lastBgWidgetUpdateTime[id] = now
+        }
 
         let state = DownloadActivityAttributes.ContentState(
             progress: min(max(progress, 0), 1),
@@ -82,13 +104,10 @@ private class LiveActivityManager {
             statusLabel: "Downloading"
         )
 
-        // Use a detached Task so it isn't tied to any actor or cancellation scope.
-        // Do NOT use Task{} which inherits the calling context and can be cancelled.
-        // Do NOT throttle — let the caller (poll timer) control frequency.
         let content = ActivityContent(state: state, staleDate: nil)
         Task.detached(priority: .utility) {
             await activity.update(content)
-            print("[LiveActivity] updated \(id) progress=\(String(format: "%.1f", progress*100))%")
+            print("[LiveActivity] updated \(id) progress=\(String(format: "%.1f", progress*100))% (Bg: \(isBackground))")
         }
     }
 
@@ -111,5 +130,6 @@ private class LiveActivityManager {
         activities.removeValue(forKey: id)
         lastBytes.removeValue(forKey: id)
         lastTime.removeValue(forKey: id)
+        lastBgWidgetUpdateTime.removeValue(forKey: id) // Clean up tracking
     }
 }
