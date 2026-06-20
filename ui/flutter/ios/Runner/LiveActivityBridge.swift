@@ -30,15 +30,13 @@ private class LiveActivityManager {
     private var lastBytes:  [String: Int64] = [:]
     private var lastTime:   [String: Date]  = [:]
 
-    // A dedicated OS thread with its own RunLoop.
-    // Swift concurrency Tasks created inside this RunLoop use IT as their
-    // executor — not the cooperative thread pool that iOS suspends in background.
-    private let activityThread = ActivityKitThread()
-
     func start(id: String, filename: String) {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
         if let old = activities[id] {
-            activityThread.run { await old.end(dismissalPolicy: .immediate) }
+            // End old activity synchronously via main actor
+            Task { @MainActor in
+                await old.end(dismissalPolicy: .immediate)
+            }
         }
         let attrs = DownloadActivityAttributes(downloadId: id, filename: filename)
         let state = DownloadActivityAttributes.ContentState(
@@ -76,8 +74,12 @@ private class LiveActivityManager {
         )
         let content = ActivityContent(state: state, staleDate: nil)
 
-        // Run on the dedicated ActivityKit thread — bypasses cooperative pool suspension.
-        activityThread.run {
+        // @MainActor: runs on the main thread's RunLoop.
+        // When AVAudioSession .playback is active, iOS keeps the main RunLoop
+        // alive even in background — audio render callbacks require it.
+        // This is the ONLY executor guaranteed to run while backgrounded
+        // without a server-side push notification.
+        Task { @MainActor in
             await activity.update(content)
             print("[LiveActivity] updated \(id) \(String(format:"%.1f",progress*100))%")
         }
@@ -92,65 +94,11 @@ private class LiveActivityManager {
             statusLabel: success ? "Done" : "Failed"
         )
         let content = ActivityContent(state: state, staleDate: nil)
-        activityThread.run {
+        Task { @MainActor in
             await activity.end(content, dismissalPolicy: .after(Date().addingTimeInterval(5)))
-            print("[LiveActivity] ended \(id)")
         }
         activities.removeValue(forKey: id)
         lastBytes.removeValue(forKey: id)
         lastTime.removeValue(forKey: id)
-    }
-}
-
-// MARK: - Dedicated RunLoop thread for ActivityKit async calls
-//
-// Problem: Swift's cooperative thread pool is suspended by iOS when the app
-// is backgrounded, so `Task { await activity.update() }` never executes.
-//
-// Fix: Create a real OS Thread with its own RunLoop that stays alive forever.
-// When you schedule work on this thread's RunLoop, Swift async calls use
-// *that* thread as their executor — iOS cannot suspend individual threads
-// the same way it suspends the cooperative pool.
-//
-// This is the same pattern UIKit uses internally for animation callbacks
-// and how third-party media frameworks handle background playback.
-
-private class ActivityKitThread: NSObject {
-
-    private var thread: Thread!
-    private var runLoop: CFRunLoop?
-    private let ready = DispatchSemaphore(value: 0)
-
-    override init() {
-        super.init()
-        thread = Thread(target: self, selector: #selector(threadMain), object: nil)
-        thread.name = "com.gopeed.activitykit"
-        thread.qualityOfService = .userInitiated   // high priority — not background
-        thread.start()
-        ready.wait() // block until RunLoop is ready
-    }
-
-    @objc private func threadMain() {
-        runLoop = CFRunLoopGetCurrent()
-        // Add a dummy source so the RunLoop doesn't exit immediately
-        let ctx = CFRunLoopSourceContext()
-        var mutableCtx = ctx
-        let source = CFRunLoopSourceCreate(nil, 0, &mutableCtx)
-        CFRunLoopAddSource(runLoop, source, .defaultMode)
-        ready.signal()
-        CFRunLoopRun() // run forever until CFRunLoopStop is called
-    }
-
-    /// Schedule an async block on this thread's RunLoop.
-    func run(_ block: @escaping () async -> Void) {
-        guard let rl = runLoop else { return }
-        CFRunLoopPerformBlock(rl, CFRunLoopMode.defaultMode.rawValue) {
-            // Create the Task while ON this thread — Swift concurrency will
-            // use this thread's RunLoop as the executor for the await points.
-            Task {
-                await block()
-            }
-        }
-        CFRunLoopWakeUp(rl)
     }
 }
