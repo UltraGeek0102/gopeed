@@ -1,17 +1,13 @@
 import ActivityKit
 import Foundation
 
-/// Thin bridge callable from BackgroundDownloadManager and AppDelegate.
-/// All public methods are safe to call on any iOS version — they are no-ops below 16.2.
 class LiveActivityBridge {
 
     static let shared = LiveActivityBridge()
     private init() {}
 
     func start(id: String, filename: String) {
-        if #available(iOS 16.2, *) {
-            _manager.start(id: id, filename: filename)
-        }
+        if #available(iOS 16.2, *) { _manager.start(id: id, filename: filename) }
     }
 
     func update(id: String, progress: Double, downloaded: Int64, total: Int64) {
@@ -21,17 +17,12 @@ class LiveActivityBridge {
     }
 
     func end(id: String, success: Bool) {
-        if #available(iOS 16.2, *) {
-            _manager.end(id: id, success: success)
-        }
+        if #available(iOS 16.2, *) { _manager.end(id: id, success: success) }
     }
 
-    // Backing store only accessible when @available check passes
     @available(iOS 16.2, *)
     private lazy var _manager = LiveActivityManager()
 }
-
-// MARK: - Actual manager (iOS 16.2+)
 
 @available(iOS 16.2, *)
 private class LiveActivityManager {
@@ -40,110 +31,85 @@ private class LiveActivityManager {
     private var lastBytes: [String: Int64] = [:]
     private var lastTime: [String: Date] = [:]
 
-    private var lastUpdateTime: [String: Date] = [:]
-    private var lastReportedProgress: [String: Double] = [:]
-
     func start(id: String, filename: String) {
-        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+            print("[LiveActivity] activities not enabled")
+            return
+        }
 
-        // If an activity for this id already exists, end it first
         if let existing = activities[id] {
-            Task { await existing.end(dismissalPolicy: .immediate) }
+            existing.end(dismissalPolicy: .immediate)
         }
 
         let attrs = DownloadActivityAttributes(downloadId: id, filename: filename)
-        let initialState = DownloadActivityAttributes.ContentState(
-            progress: 0,
-            downloadedBytes: 0,
-            totalBytes: 0,
-            speedBytesPerSec: 0,
-            statusLabel: "Downloading"
+        let state = DownloadActivityAttributes.ContentState(
+            progress: 0, downloadedBytes: 0, totalBytes: 0,
+            speedBytesPerSec: 0, statusLabel: "Downloading"
         )
-
         do {
             let activity = try Activity<DownloadActivityAttributes>.request(
                 attributes: attrs,
-                content: ActivityContent(
-                    state: initialState,
-                    staleDate: Date().addingTimeInterval(4 * 3600)
-                )
+                content: ActivityContent(state: state, staleDate: nil)
             )
             activities[id] = activity
+            print("[LiveActivity] started for \(id)")
         } catch {
-            // Live Activities not available or user disabled them — silent fail
-            print("[LiveActivity] start failed for \(id): \(error)")
+            print("[LiveActivity] start failed: \(error)")
         }
     }
 
     func update(id: String, progress: Double, downloaded: Int64, total: Int64) {
+        guard let activity = activities[id] else {
+            print("[LiveActivity] update called but no activity for \(id)")
+            return
+        }
 
-    guard let activity = activities[id] else { return }
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastTime[id] ?? now)
+        let delta = downloaded - (lastBytes[id] ?? 0)
+        let speed: Int64 = elapsed > 0.1 ? Int64(Double(max(delta, 0)) / elapsed) : 0
 
-    let now = Date()
+        lastBytes[id] = downloaded
+        lastTime[id] = now
 
-    // Only update every 5 seconds
-    // Skip only if BOTH conditions are true
-    if let last = lastUpdateTime[id],
-       let prev = lastReportedProgress[id],
-       now.timeIntervalSince(last) < 5 &&
-       abs(progress - prev) < 0.02 {
-        return
-    }
+        let state = DownloadActivityAttributes.ContentState(
+            progress: min(max(progress, 0), 1),
+            downloadedBytes: downloaded,
+            totalBytes: total,
+            speedBytesPerSec: speed,
+            statusLabel: "Downloading"
+        )
 
-    lastUpdateTime[id] = now
-    lastReportedProgress[id] = progress
-
-    let elapsed = now.timeIntervalSince(lastTime[id] ?? now)
-    let delta = downloaded - (lastBytes[id] ?? 0)
-
-    let speed: Int64 =
-        elapsed > 0.5
-        ? Int64(Double(delta) / elapsed)
-        : 0
-
-    lastBytes[id] = downloaded
-    lastTime[id] = now
-
-    let updatedState = DownloadActivityAttributes.ContentState(
-        progress: min(max(progress, 0), 1),
-        downloadedBytes: downloaded,
-        totalBytes: total,
-        speedBytesPerSec: max(speed, 0),
-        statusLabel: "Downloading"
-    )
-
-    Task {
-        await activity.update(
-            ActivityContent(
-                state: updatedState,
-                staleDate: Date().addingTimeInterval(60))
-            )
+        // Use a detached Task so it isn't tied to any actor or cancellation scope.
+        // Do NOT use Task{} which inherits the calling context and can be cancelled.
+        // Do NOT throttle — let the caller (poll timer) control frequency.
+        let content = ActivityContent(state: state, staleDate: nil)
+        Task.detached(priority: .utility) {
+            do {
+                await activity.update(content)
+                print("[LiveActivity] updated \(id) progress=\(String(format: "%.1f", progress*100))%")
+            }
         }
     }
 
     func end(id: String, success: Bool) {
         guard let activity = activities[id] else { return }
 
-        let finalState = DownloadActivityAttributes.ContentState(
+        let state = DownloadActivityAttributes.ContentState(
             progress: success ? 1.0 : 0.0,
             downloadedBytes: lastBytes[id] ?? 0,
             totalBytes: 0,
             speedBytesPerSec: 0,
             statusLabel: success ? "Done" : "Failed"
         )
-
-        Task {
-            await activity.end(
-                ActivityContent(state: finalState, staleDate: nil),
-                dismissalPolicy: .after(Date().addingTimeInterval(5))
-            )
+        let content = ActivityContent(state: state, staleDate: nil)
+        Task.detached(priority: .utility) {
+            await activity.end(content, dismissalPolicy: .after(Date().addingTimeInterval(5)))
+            print("[LiveActivity] ended \(id) success=\(success)")
         }
 
         activities.removeValue(forKey: id)
         lastBytes.removeValue(forKey: id)
         lastTime.removeValue(forKey: id)
-        
-        lastUpdateTime.removeValue(forKey: id)
-        lastReportedProgress.removeValue(forKey: id)
     }
 }
