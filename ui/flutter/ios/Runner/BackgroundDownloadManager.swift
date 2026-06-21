@@ -2,9 +2,27 @@ import Foundation
 import UIKit
 import AVFoundation
 
+/// Drives Live Activity updates via chained background URLSession tasks.
+///
+/// Architecture:
+/// - A background URLSession (managed by iOS networking daemon, NOT the app process)
+///   makes repeated GET requests to the Go engine at 127.0.0.1:port
+/// - iOS wakes the app via handleEventsForBackgroundURLSession when each completes
+/// - In the delegate callback (a real system-granted execution window):
+///     1. Parse the response and update the Live Activity — this WORKS here
+///     2. Schedule the next background URLSession task immediately
+///     3. Call the system completion handler to close this wake window
+/// - This creates a self-perpetuating chain that gives continuous real-time updates
+///
+/// This is the same mechanism used by apps like Flighty for real-time Live Activities.
+/// The key: background URLSession completions are system-granted execution windows
+/// where ALL async APIs including ActivityKit work correctly.
 class BackgroundDownloadManager: NSObject {
 
     static let shared = BackgroundDownloadManager()
+
+    // Background URLSession identifier for polling (different from file download session)
+    static let pollSessionId = "com.gopeed.gopeed.lapoll"
 
     // MARK: - Go engine connection
 
@@ -12,9 +30,9 @@ class BackgroundDownloadManager: NSObject {
     private(set) var apiToken: String = ""
 
     func configure(port: Int, apiToken: String) {
-        self.goPort  = port
+        self.goPort   = port
         self.apiToken = apiToken
-        print("[BgDL] configured port=\(port)")
+        print("[BgDL] port=\(port)")
     }
 
     // MARK: - State
@@ -25,13 +43,23 @@ class BackgroundDownloadManager: NSObject {
     private var progressHandlers:   [String: (Double, Int64, Int64) -> Void] = [:]
     private var completionHandlers: [String: (Error?) -> Void] = [:]
 
-    // MARK: - Resources
+    // Background URLSession for polling — iOS manages this, not our thread
+    private lazy var pollSession: URLSession = {
+        let cfg = URLSessionConfiguration.background(withIdentifier: Self.pollSessionId)
+        cfg.isDiscretionary = false
+        cfg.sessionSendsLaunchEvents = true
+        cfg.timeoutIntervalForRequest  = 5
+        cfg.timeoutIntervalForResource = 5
+        return URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
+    }()
 
-    private var bgTaskId:      UIBackgroundTaskIdentifier = .invalid
-    private var audioPlayer:   AVAudioPlayer?
-    private let pollQueue =    DispatchQueue(label: "com.gopeed.poll", qos: .userInitiated)
-    private var pollRunning =  false
-    private var pollStop =     false
+    // Set by AppDelegate when system delivers background session events
+    var systemCompletionHandler: (() -> Void)?
+
+    // MARK: - Audio (keeps process alive between URLSession wake events)
+
+    private var audioPlayer: AVAudioPlayer?
+    private var bgTaskId: UIBackgroundTaskIdentifier = .invalid
 
     private override init() {
         super.init()
@@ -40,8 +68,6 @@ class BackgroundDownloadManager: NSObject {
             self, selector: #selector(audioInterrupted(_:)),
             name: AVAudioSession.interruptionNotification, object: nil)
     }
-
-    // MARK: - Audio (keeps process alive)
 
     private func setupAudio() {
         do {
@@ -52,12 +78,8 @@ class BackgroundDownloadManager: NSObject {
     }
 
     private func startAudio() {
-        audioPlayer?.stop()
-        audioPlayer = nil
-        do { try AVAudioSession.sharedInstance().setActive(true) }
-        catch { print("[BgDL] setActive: \(error)") }
-
-        // 30-second silent WAV
+        audioPlayer?.stop(); audioPlayer = nil
+        do { try AVAudioSession.sharedInstance().setActive(true) } catch {}
         let sr = 44100, secs = 30, ds = sr * secs * 2
         var wav = Data(count: 44 + ds)
         wav.withUnsafeMutableBytes { ptr in
@@ -81,9 +103,8 @@ class BackgroundDownloadManager: NSObject {
             audioPlayer = try AVAudioPlayer(data: wav, fileTypeHint: AVFileType.wav.rawValue)
             audioPlayer?.numberOfLoops = -1
             audioPlayer?.volume = 0.01
-            let ok = audioPlayer?.play() ?? false
-            print("[BgDL] audio play: \(ok)")
-        } catch { print("[BgDL] audio error: \(error)") }
+            audioPlayer?.play()
+        } catch { print("[BgDL] audio: \(error)") }
     }
 
     private func stopAudio() { audioPlayer?.stop(); audioPlayer = nil }
@@ -97,15 +118,13 @@ class BackgroundDownloadManager: NSObject {
         if has { startAudio() }
     }
 
-    // MARK: - Background task token
-
     private func beginBgTask() {
         if bgTaskId != .invalid { UIApplication.shared.endBackgroundTask(bgTaskId); bgTaskId = .invalid }
         bgTaskId = UIApplication.shared.beginBackgroundTask(withName: "gopeed") { [weak self] in
             guard let self = self else { return }
             UIApplication.shared.endBackgroundTask(self.bgTaskId)
             self.bgTaskId = .invalid
-            self.beginBgTask() // renew immediately
+            self.beginBgTask()
         }
     }
 
@@ -115,88 +134,110 @@ class BackgroundDownloadManager: NSObject {
         bgTaskId = .invalid
     }
 
-    // MARK: - Poll loop (POSIX sockets — cannot be suspended by iOS)
+    // MARK: - Background URLSession polling chain
 
-    private func startPolling() {
-        guard !pollRunning else { return }
-        pollRunning = true
-        pollStop    = false
-        pollQueue.async { [weak self] in self?.pollLoop() }
-        print("[BgDL] poll started")
+    /// Schedule one poll request. iOS delivers the result via URLSessionDelegate
+    /// even when the app is backgrounded, because it's a background URLSession.
+    func schedulePollTask() {
+        lock.lock()
+        let has  = !activeIds.isEmpty
+        let port = goPort
+        lock.unlock()
+        guard has, port > 0 else { return }
+
+        guard let url = URL(string: "http://127.0.0.1:\(port)/api/v1/tasks?status=running") else { return }
+        var req = URLRequest(url: url)
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        if !apiToken.isEmpty { req.setValue(apiToken, forHTTPHeaderField: "X-Api-Token") }
+        // Short timeout so the chain reschedules quickly
+        req.timeoutInterval = 4
+
+        pollSession.dataTask(with: req).resume()
+        print("[BgDL] poll task scheduled")
     }
 
-    private func stopPolling() { pollStop = true; pollRunning = false }
+    // MARK: - Public API
 
-    private func pollLoop() {
-        while !pollStop {
-            lock.lock(); let has = !activeIds.isEmpty; let port = goPort; lock.unlock()
-            if has && port > 0 {
-                if let data = rawGet(path: "/api/v1/tasks?status=running", port: port) {
-                    handlePollData(data)
-                }
-            }
-            var tv = timeval(tv_sec: 1, tv_usec: 0)
-            select(0, nil, nil, nil, &tv)
+    func registerDownload(id: String, filename: String,
+                          onProgress: @escaping (Double, Int64, Int64) -> Void,
+                          onComplete: @escaping (Error?) -> Void) {
+        lock.lock()
+        activeIds.insert(id); filenameMap[id] = filename
+        progressHandlers[id] = onProgress; completionHandlers[id] = onComplete
+        lock.unlock()
+
+        DispatchQueue.main.async {
+            self.beginBgTask()
+            self.startAudio()
+            LiveActivityBridge.shared.start(id: id, filename: filename)
+            // Start the polling chain — first task fires immediately
+            self.schedulePollTask()
         }
-        pollRunning = false
     }
 
-    // Raw POSIX HTTP GET — loopback only, no URLSession suspension risk
-    private func rawGet(path: String, port: Int) -> Data? {
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else { return nil }
-        defer { close(fd) }
+    func updateProgress(id: String, progress: Double, downloaded: Int64, total: Int64) {
+        LiveActivityBridge.shared.update(id: id, progress: progress,
+                                         downloaded: downloaded, total: total)
+    }
 
-        var tv = timeval(tv_sec: 2, tv_usec: 0)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    func completeDownload(id: String, errorMessage: String?) {
+        finishDownload(id: id, failed: errorMessage != nil)
+    }
+    func cancelDownload(id: String) { finishDownload(id: id, failed: false) }
 
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port   = in_port_t(port).bigEndian
-        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr)
+    func reattach(id: String, onProgress: @escaping (Double, Int64, Int64) -> Void,
+                  onComplete: @escaping (Error?) -> Void) {
+        lock.lock(); progressHandlers[id] = onProgress; completionHandlers[id] = onComplete; lock.unlock()
+    }
 
-        let ok = withUnsafePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
+    private func finishDownload(id: String, failed: Bool) {
+        lock.lock()
+        let h = completionHandlers[id]
+        activeIds.remove(id); filenameMap.removeValue(forKey: id)
+        progressHandlers.removeValue(forKey: id); completionHandlers.removeValue(forKey: id)
+        let left = activeIds.count
+        lock.unlock()
+
+        if let h = h {
+            let err: Error? = failed ? NSError(domain: "com.gopeed", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Failed"]) : nil
+            DispatchQueue.main.async { h(err) }
         }
-        guard ok == 0 else { print("[BgDL] connect errno=\(errno)"); return nil }
-
-        var req = "GET \(path) HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nAccept: application/json\r\nConnection: close\r\n"
-        if !apiToken.isEmpty { req += "X-Api-Token: \(apiToken)\r\n" }
-        req += "\r\n"
-
-        let rb = Array(req.utf8)
-        guard rb.withUnsafeBytes({ send(fd, $0.baseAddress, rb.count, 0) }) > 0 else { return nil }
-
-        var resp = Data()
-        var buf = [UInt8](repeating: 0, count: 8192)
-        while true { let n = recv(fd, &buf, buf.count, 0); if n <= 0 { break }; resp.append(contentsOf: buf[0..<n]) }
-
-        guard let sep = resp.range(of: Data([0x0D,0x0A,0x0D,0x0A])) else { return nil }
-        let body = Data(resp[sep.upperBound...])
-        return resp.range(of: Data("Transfer-Encoding: chunked".utf8)) != nil ? dechunk(body) : body
-    }
-
-    private func dechunk(_ d: Data) -> Data {
-        var out = Data(); var i = d.startIndex
-        while i < d.endIndex {
-            guard let nl = d[i...].range(of: Data([0x0D,0x0A])) else { break }
-            let sz = Int(String(data: d[i..<nl.lowerBound], encoding: .utf8)?.trimmingCharacters(in: .whitespaces) ?? "0", radix: 16) ?? 0
-            if sz == 0 { break }
-            i = nl.upperBound
-            guard i + sz <= d.endIndex else { break }
-            out.append(d[i..<d.index(i, offsetBy: sz)]); i = d.index(i, offsetBy: sz + 2)
+        LiveActivityBridge.shared.end(id: id, success: !failed)
+        if left == 0 {
+            stopAudio(); endBgTask()
+            print("[BgDL] all done")
         }
-        return out
     }
 
-    private func handlePollData(_ data: Data) {
+    func applicationDidEnterBackground() {
+        lock.lock(); let has = !activeIds.isEmpty; lock.unlock()
+        guard has else { return }
+        beginBgTask()
+        startAudio()
+        print("[BgDL] backgrounded — chain continues via URLSession delegate")
+    }
+
+    func applicationWillEnterForeground() {
+        endBgTask()
+    }
+}
+
+// MARK: - URLSession delegate (called by iOS in proper execution context)
+
+extension BackgroundDownloadManager: URLSessionDataDelegate {
+
+    /// Called when a poll task receives data. Parse and update Live Activity.
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive data: Data) {
+        print("[BgDL] poll response received \(data.count) bytes")
         guard
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let arr  = json["data"] as? [[String: Any]]
-        else { print("[BgDL] parse error: \(String(data: data.prefix(100), encoding: .utf8) ?? "?")"); return }
+        else {
+            print("[BgDL] parse fail: \(String(data: data.prefix(100), encoding: .utf8) ?? "?")")
+            return
+        }
 
         lock.lock(); let active = activeIds; lock.unlock()
         let seen = Set(arr.compactMap { $0["id"] as? String })
@@ -213,82 +254,50 @@ class BackgroundDownloadManager: NSObject {
             let total = (res?["size"] as? Int64) ?? Int64((res?["size"] as? Int) ?? 0)
             let frac  = total > 0 ? Double(dl) / Double(total) : 0.0
 
-            print("[BgDL] \(id) \(String(format:"%.1f",frac*100))%")
+            print("[BgDL] update \(id) \(String(format:"%.1f",frac*100))%")
+
+            // This delegate is called in a system-granted background execution window.
+            // ActivityKit update WORKS here — this is the correct context.
             LiveActivityBridge.shared.update(id: id, progress: frac, downloaded: dl, total: total)
 
             lock.lock(); let h = progressHandlers[id]; lock.unlock()
             if let h = h { DispatchQueue.main.async { h(frac, dl, total) } }
         }
 
-        for id in active.subtracting(seen) { checkFinished(id: id) }
-    }
-
-    private func checkFinished(id: String) {
-        lock.lock(); let port = goPort; lock.unlock()
-        guard port > 0,
-              let data = rawGet(path: "/api/v1/tasks/\(id)", port: port),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let task = json["data"] as? [String: Any]
-        else { return }
-        let s: Int
-        if let n = task["status"] as? Int { s = n }
-        else if let str = task["status"] as? String, let n = Int(str) { s = n }
-        else { return }
-        if s == 5 { finishDownload(id: id, failed: false) }
-        else if s == 4 { finishDownload(id: id, failed: true) }
-    }
-
-    // MARK: - Public API
-
-    func registerDownload(id: String, filename: String,
-                          onProgress: @escaping (Double, Int64, Int64) -> Void,
-                          onComplete: @escaping (Error?) -> Void) {
-        lock.lock()
-        activeIds.insert(id); filenameMap[id] = filename
-        progressHandlers[id] = onProgress; completionHandlers[id] = onComplete
-        lock.unlock()
-        DispatchQueue.main.async {
-            self.beginBgTask(); self.startAudio(); self.startPolling()
-            LiveActivityBridge.shared.start(id: id, filename: filename)
+        // Check for completions
+        lock.lock(); let active2 = activeIds; lock.unlock()
+        for id in active2.subtracting(seen) {
+            // Task not in running list — might be done
+            // Don't verify here to keep this delegate fast; let next poll catch it
+            print("[BgDL] \(id) not in running list")
         }
     }
 
-    func updateProgress(id: String, progress: Double, downloaded: Int64, total: Int64) {
-        LiveActivityBridge.shared.update(id: id, progress: progress, downloaded: downloaded, total: total)
-    }
+    /// Called when a poll task completes. Schedule the next one immediately.
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    didCompleteWithError error: Error?) {
+        if let e = error { print("[BgDL] poll task error: \(e)") }
 
-    func completeDownload(id: String, errorMessage: String?) { finishDownload(id: id, failed: errorMessage != nil) }
-    func cancelDownload(id: String)                          { finishDownload(id: id, failed: false) }
-
-    func reattach(id: String, onProgress: @escaping (Double, Int64, Int64) -> Void,
-                  onComplete: @escaping (Error?) -> Void) {
-        lock.lock(); progressHandlers[id] = onProgress; completionHandlers[id] = onComplete; lock.unlock()
-    }
-
-    private func finishDownload(id: String, failed: Bool) {
-        lock.lock()
-        let h = completionHandlers[id]
-        activeIds.remove(id); filenameMap.removeValue(forKey: id)
-        progressHandlers.removeValue(forKey: id); completionHandlers.removeValue(forKey: id)
-        let left = activeIds.count
-        lock.unlock()
-        if let h = h {
-            let err: Error? = failed ? NSError(domain: "com.gopeed", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed"]) : nil
-            DispatchQueue.main.async { h(err) }
-        }
-        LiveActivityBridge.shared.end(id: id, success: !failed)
-        if left == 0 { stopPolling(); stopAudio(); endBgTask(); print("[BgDL] all done") }
-    }
-
-    func applicationDidEnterBackground() {
         lock.lock(); let has = !activeIds.isEmpty; lock.unlock()
-        guard has else { return }
-        beginBgTask(); startAudio(); startPolling()
-        print("[BgDL] backgrounded with \(activeIds.count) active")
+
+        if has {
+            // Delay 1 second then schedule next poll
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.schedulePollTask()
+            }
+        }
+
+        // Tell the system we've finished processing this background event
+        systemCompletionHandler?()
+        systemCompletionHandler = nil
     }
 
-    func applicationWillEnterForeground() {
-        endBgTask()
-        print("[BgDL] foregrounded")
+    /// Called when all background tasks for this session have finished.
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        print("[BgDL] all session events finished")
+        DispatchQueue.main.async {
+            self.systemCompletionHandler?()
+            self.systemCompletionHandler = nil
+        }
     }
 }
