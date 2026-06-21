@@ -71,6 +71,23 @@ import Libgopeed
         BackgroundDownloadManager.shared.applicationWillEnterForeground()
     }
 
+    // Required: deliver background URLSession events to the correct session.
+    // This is called when iOS wakes the app because a background URLSession task completed.
+    // Both the poll session (lapoll) and any future download sessions use this.
+    override func application(_ application: UIApplication,
+                               handleEventsForBackgroundURLSession identifier: String,
+                               completionHandler: @escaping () -> Void) {
+        print("[AppDelegate] background session event: \(identifier)")
+        if identifier == BackgroundDownloadManager.pollSessionId {
+            // Store the handler — BackgroundDownloadManager calls it after processing
+            BackgroundDownloadManager.shared.systemCompletionHandler = completionHandler
+            // The pollSession delegate will handle the actual events
+        } else {
+            // Unknown session — complete immediately
+            completionHandler()
+        }
+    }
+
     // ── Channel handler ────────────────────────────────────────────────────────
 
     private func handleBackground(call: FlutterMethodCall, result: @escaping FlutterResult) {
