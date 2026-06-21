@@ -30,15 +30,12 @@ private class LiveActivityManager {
     private let lock = NSLock()
 
     func start(id: String, filename: String) {
-        guard ActivityAuthorizationInfo().areActivitiesEnabled else {
-            print("[LA] not enabled"); return
-        }
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
         lock.lock()
         if let old = activities[id] {
             Task.detached { await old.end(dismissalPolicy: .immediate) }
         }
         lock.unlock()
-
         let attrs = DownloadActivityAttributes(downloadId: id, filename: filename)
         let state = DownloadActivityAttributes.ContentState(
             progress: 0, downloadedBytes: 0, totalBytes: 0,
@@ -54,8 +51,9 @@ private class LiveActivityManager {
         } catch { print("[LA] start error: \(error)") }
     }
 
-    /// Called from background URLSession delegate — this context IS valid for ActivityKit.
-    /// No async/await tricks needed; we use a semaphore to wait for completion on-thread.
+    /// Fire-and-forget update — NEVER blocks the calling thread.
+    /// Called from URLSession delegate queue; must return immediately so
+    /// iOS can deliver urlSessionDidFinishEvents and receive systemCompletionHandler.
     func update(id: String, progress: Double, downloaded: Int64, total: Int64) {
         lock.lock()
         let act = activities[id]
@@ -78,22 +76,18 @@ private class LiveActivityManager {
         )
         let content = ActivityContent(state: state, staleDate: nil)
 
-        // Block current thread until ActivityKit update completes.
-        // This is safe because we're called from a background URLSession delegate
-        // thread (not main thread, not cooperative pool).
-        let sem = DispatchSemaphore(value: 0)
+        // Fire-and-forget — do NOT block with semaphore.
+        // The URLSession delegate queue must stay free so iOS can call
+        // urlSessionDidFinishEvents → systemCompletionHandler → next wake.
         Task.detached(priority: .userInitiated) {
             await activity.update(content)
-            print("[LA] updated \(id) \(String(format:"%.1f",progress*100))%")
-            sem.signal()
+            print("[LA] updated \(id) \(String(format:"%.1f", progress*100))%")
         }
-        sem.wait()
     }
 
     func end(id: String, success: Bool) {
         lock.lock(); let act = activities[id]; lock.unlock()
         guard let activity = act else { return }
-
         let state = DownloadActivityAttributes.ContentState(
             progress: success ? 1.0 : 0.0,
             downloadedBytes: lastBytes[id] ?? 0,
