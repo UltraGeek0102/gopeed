@@ -2,26 +2,9 @@ import Foundation
 import UIKit
 import AVFoundation
 
-/// Drives Live Activity updates via chained background URLSession tasks.
-///
-/// Architecture:
-/// - A background URLSession (managed by iOS networking daemon, NOT the app process)
-///   makes repeated GET requests to the Go engine at 127.0.0.1:port
-/// - iOS wakes the app via handleEventsForBackgroundURLSession when each completes
-/// - In the delegate callback (a real system-granted execution window):
-///     1. Parse the response and update the Live Activity — this WORKS here
-///     2. Schedule the next background URLSession task immediately
-///     3. Call the system completion handler to close this wake window
-/// - This creates a self-perpetuating chain that gives continuous real-time updates
-///
-/// This is the same mechanism used by apps like Flighty for real-time Live Activities.
-/// The key: background URLSession completions are system-granted execution windows
-/// where ALL async APIs including ActivityKit work correctly.
 class BackgroundDownloadManager: NSObject {
 
     static let shared = BackgroundDownloadManager()
-
-    // Background URLSession identifier for polling (different from file download session)
     static let pollSessionId = "com.gopeed.gopeed.lapoll"
 
     // MARK: - Go engine connection
@@ -32,7 +15,7 @@ class BackgroundDownloadManager: NSObject {
     func configure(port: Int, apiToken: String) {
         self.goPort   = port
         self.apiToken = apiToken
-        print("[BgDL] port=\(port)")
+        print("[BgDL] configured port=\(port)")
     }
 
     // MARK: - State
@@ -43,20 +26,28 @@ class BackgroundDownloadManager: NSObject {
     private var progressHandlers:   [String: (Double, Int64, Int64) -> Void] = [:]
     private var completionHandlers: [String: (Error?) -> Void] = [:]
 
-    // Background URLSession for polling — iOS manages this, not our thread
+    // Background URLSession — managed by iOS nsurlsessiond, NOT suspended with app
     private lazy var pollSession: URLSession = {
         let cfg = URLSessionConfiguration.background(withIdentifier: Self.pollSessionId)
         cfg.isDiscretionary = false
         cfg.sessionSendsLaunchEvents = true
         cfg.timeoutIntervalForRequest  = 5
         cfg.timeoutIntervalForResource = 5
+        // IMPORTANT: nil delegateQueue means iOS uses its own internal serial queue
+        // We must NOT block this queue (no semaphores in delegate callbacks)
         return URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
     }()
 
-    // Set by AppDelegate when system delivers background session events
+    // Completion handler provided by iOS via handleEventsForBackgroundURLSession.
+    // MUST be called promptly (within ~5s) after all session events are processed.
+    // Calling it tells iOS "we're done, you can suspend us again".
+    // iOS will NOT send the next wake event until this is called.
     var systemCompletionHandler: (() -> Void)?
 
-    // MARK: - Audio (keeps process alive between URLSession wake events)
+    // Accumulate data across didReceive calls (background URLSession can split data)
+    private var taskData: [Int: Data] = [:]
+
+    // MARK: - Audio keep-alive
 
     private var audioPlayer: AVAudioPlayer?
     private var bgTaskId: UIBackgroundTaskIdentifier = .invalid
@@ -104,7 +95,8 @@ class BackgroundDownloadManager: NSObject {
             audioPlayer?.numberOfLoops = -1
             audioPlayer?.volume = 0.01
             audioPlayer?.play()
-        } catch { print("[BgDL] audio: \(error)") }
+            print("[BgDL] audio playing")
+        } catch { print("[BgDL] audio error: \(error)") }
     }
 
     private func stopAudio() { audioPlayer?.stop(); audioPlayer = nil }
@@ -119,7 +111,9 @@ class BackgroundDownloadManager: NSObject {
     }
 
     private func beginBgTask() {
-        if bgTaskId != .invalid { UIApplication.shared.endBackgroundTask(bgTaskId); bgTaskId = .invalid }
+        if bgTaskId != .invalid {
+            UIApplication.shared.endBackgroundTask(bgTaskId); bgTaskId = .invalid
+        }
         bgTaskId = UIApplication.shared.beginBackgroundTask(withName: "gopeed") { [weak self] in
             guard let self = self else { return }
             UIApplication.shared.endBackgroundTask(self.bgTaskId)
@@ -130,30 +124,31 @@ class BackgroundDownloadManager: NSObject {
 
     private func endBgTask() {
         guard bgTaskId != .invalid else { return }
-        UIApplication.shared.endBackgroundTask(bgTaskId)
-        bgTaskId = .invalid
+        UIApplication.shared.endBackgroundTask(bgTaskId); bgTaskId = .invalid
     }
 
-    // MARK: - Background URLSession polling chain
+    // MARK: - Poll scheduling
 
-    /// Schedule one poll request. iOS delivers the result via URLSessionDelegate
-    /// even when the app is backgrounded, because it's a background URLSession.
     func schedulePollTask() {
         lock.lock()
         let has  = !activeIds.isEmpty
         let port = goPort
         lock.unlock()
-        guard has, port > 0 else { return }
+        guard has, port > 0 else {
+            print("[BgDL] no active downloads or port not set, skip poll")
+            return
+        }
 
         guard let url = URL(string: "http://127.0.0.1:\(port)/api/v1/tasks?status=running") else { return }
         var req = URLRequest(url: url)
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         if !apiToken.isEmpty { req.setValue(apiToken, forHTTPHeaderField: "X-Api-Token") }
-        // Short timeout so the chain reschedules quickly
         req.timeoutInterval = 4
 
-        pollSession.dataTask(with: req).resume()
-        print("[BgDL] poll task scheduled")
+        let task = pollSession.dataTask(with: req)
+        taskData[task.taskIdentifier] = Data()
+        task.resume()
+        print("[BgDL] poll task \(task.taskIdentifier) scheduled")
     }
 
     // MARK: - Public API
@@ -165,12 +160,10 @@ class BackgroundDownloadManager: NSObject {
         activeIds.insert(id); filenameMap[id] = filename
         progressHandlers[id] = onProgress; completionHandlers[id] = onComplete
         lock.unlock()
-
         DispatchQueue.main.async {
             self.beginBgTask()
             self.startAudio()
             LiveActivityBridge.shared.start(id: id, filename: filename)
-            // Start the polling chain — first task fires immediately
             self.schedulePollTask()
         }
     }
@@ -197,50 +190,89 @@ class BackgroundDownloadManager: NSObject {
         progressHandlers.removeValue(forKey: id); completionHandlers.removeValue(forKey: id)
         let left = activeIds.count
         lock.unlock()
-
         if let h = h {
             let err: Error? = failed ? NSError(domain: "com.gopeed", code: -1,
                 userInfo: [NSLocalizedDescriptionKey: "Failed"]) : nil
             DispatchQueue.main.async { h(err) }
         }
         LiveActivityBridge.shared.end(id: id, success: !failed)
-        if left == 0 {
-            stopAudio(); endBgTask()
-            print("[BgDL] all done")
-        }
+        if left == 0 { stopAudio(); endBgTask(); print("[BgDL] all done") }
     }
 
     func applicationDidEnterBackground() {
         lock.lock(); let has = !activeIds.isEmpty; lock.unlock()
         guard has else { return }
-        beginBgTask()
-        startAudio()
-        print("[BgDL] backgrounded — chain continues via URLSession delegate")
+        beginBgTask(); startAudio()
+        print("[BgDL] backgrounded — background URLSession chain active")
     }
 
-    func applicationWillEnterForeground() {
-        endBgTask()
-    }
+    func applicationWillEnterForeground() { endBgTask() }
 }
 
-// MARK: - URLSession delegate (called by iOS in proper execution context)
+// MARK: - URLSessionDataDelegate
 
 extension BackgroundDownloadManager: URLSessionDataDelegate {
 
-    /// Called when a poll task receives data. Parse and update Live Activity.
+    // Accumulate data (background URLSession may deliver in chunks)
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
                     didReceive data: Data) {
-        print("[BgDL] poll response received \(data.count) bytes")
+        taskData[dataTask.taskIdentifier, default: Data()].append(data)
+    }
+
+    // Task complete — process accumulated data, schedule next poll, signal iOS
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    didCompleteWithError error: Error?) {
+
+        defer {
+            taskData.removeValue(forKey: task.taskIdentifier)
+        }
+
+        if let e = error {
+            print("[BgDL] poll error: \(e)")
+        } else if let data = taskData[task.taskIdentifier], !data.isEmpty {
+            print("[BgDL] poll complete: \(data.count) bytes")
+            processData(data)
+        }
+
+        // Schedule next poll (1s delay)
+        lock.lock(); let has = !activeIds.isEmpty; lock.unlock()
+        if has {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) {
+                self.schedulePollTask()
+            }
+        }
+
+        // Signal iOS that we've finished handling this background event.
+        // This MUST be called promptly — iOS won't wake us again until it is.
+        // Do it here (not in urlSessionDidFinishEvents) so it fires per-task.
+        callSystemCompletionHandler()
+    }
+
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        print("[BgDL] urlSessionDidFinishEvents")
+        // Belt-and-suspenders: also call from here in case didCompleteWithError missed it
+        callSystemCompletionHandler()
+    }
+
+    private func callSystemCompletionHandler() {
+        DispatchQueue.main.async {
+            guard let h = self.systemCompletionHandler else { return }
+            self.systemCompletionHandler = nil
+            h()
+            print("[BgDL] systemCompletionHandler called")
+        }
+    }
+
+    private func processData(_ data: Data) {
         guard
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let arr  = json["data"] as? [[String: Any]]
         else {
-            print("[BgDL] parse fail: \(String(data: data.prefix(100), encoding: .utf8) ?? "?")")
+            print("[BgDL] JSON parse failed: \(String(data: data.prefix(200), encoding: .utf8) ?? "?")")
             return
         }
 
         lock.lock(); let active = activeIds; lock.unlock()
-        let seen = Set(arr.compactMap { $0["id"] as? String })
 
         for t in arr {
             guard
@@ -254,50 +286,13 @@ extension BackgroundDownloadManager: URLSessionDataDelegate {
             let total = (res?["size"] as? Int64) ?? Int64((res?["size"] as? Int) ?? 0)
             let frac  = total > 0 ? Double(dl) / Double(total) : 0.0
 
-            print("[BgDL] update \(id) \(String(format:"%.1f",frac*100))%")
+            print("[BgDL] \(id) \(String(format:"%.1f",frac*100))% (\(dl)/\(total))")
 
-            // This delegate is called in a system-granted background execution window.
-            // ActivityKit update WORKS here — this is the correct context.
+            // Fire-and-forget — returns immediately, does NOT block delegate queue
             LiveActivityBridge.shared.update(id: id, progress: frac, downloaded: dl, total: total)
 
             lock.lock(); let h = progressHandlers[id]; lock.unlock()
             if let h = h { DispatchQueue.main.async { h(frac, dl, total) } }
-        }
-
-        // Check for completions
-        lock.lock(); let active2 = activeIds; lock.unlock()
-        for id in active2.subtracting(seen) {
-            // Task not in running list — might be done
-            // Don't verify here to keep this delegate fast; let next poll catch it
-            print("[BgDL] \(id) not in running list")
-        }
-    }
-
-    /// Called when a poll task completes. Schedule the next one immediately.
-    func urlSession(_ session: URLSession, task: URLSessionTask,
-                    didCompleteWithError error: Error?) {
-        if let e = error { print("[BgDL] poll task error: \(e)") }
-
-        lock.lock(); let has = !activeIds.isEmpty; lock.unlock()
-
-        if has {
-            // Delay 1 second then schedule next poll
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                self?.schedulePollTask()
-            }
-        }
-
-        // Tell the system we've finished processing this background event
-        systemCompletionHandler?()
-        systemCompletionHandler = nil
-    }
-
-    /// Called when all background tasks for this session have finished.
-    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
-        print("[BgDL] all session events finished")
-        DispatchQueue.main.async {
-            self.systemCompletionHandler?()
-            self.systemCompletionHandler = nil
         }
     }
 }
