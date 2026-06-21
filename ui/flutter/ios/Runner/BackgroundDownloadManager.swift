@@ -12,70 +12,66 @@ class BackgroundDownloadManager: NSObject {
     private(set) var apiToken: String = ""
 
     func configure(port: Int, apiToken: String) {
-        self.goPort = port
+        self.goPort  = port
         self.apiToken = apiToken
-        print("[BgDL] Configured port=\(port)")
+        print("[BgDL] configured port=\(port)")
     }
 
     // MARK: - State
 
-    private var activeIds:         Set<String> = []
-    private var filenameMap:       [String: String] = [:]
-    private let lock =             NSLock()
-    private var progressHandlers:  [String: (Double, Int64, Int64) -> Void] = [:]
-    private var completionHandlers:[String: (Error?) -> Void] = [:]
+    private var activeIds:          Set<String> = []
+    private var filenameMap:        [String: String] = [:]
+    private let lock =              NSLock()
+    private var progressHandlers:   [String: (Double, Int64, Int64) -> Void] = [:]
+    private var completionHandlers: [String: (Error?) -> Void] = [:]
 
-    // MARK: - Keep-alive resources
+    // MARK: - Resources
 
-    private var bgTaskId:       UIBackgroundTaskIdentifier = .invalid
-    private var audioPlayer:    AVAudioPlayer?
-    // Poll loop: dedicated background thread using POSIX sockets (can't be suspended)
-    private let pollQueue =     DispatchQueue(label: "com.gopeed.bgpoll", qos: .userInitiated)
-    private var isPolling =     false
-    private var pollShouldStop = false
-    // Heartbeat: DispatchSourceTimer on main queue forces the main RunLoop to spin,
-    // which drains @MainActor tasks (ActivityKit updates) even when backgrounded.
-    private var heartbeat: DispatchSourceTimer?
+    private var bgTaskId:      UIBackgroundTaskIdentifier = .invalid
+    private var audioPlayer:   AVAudioPlayer?
+    private let pollQueue =    DispatchQueue(label: "com.gopeed.poll", qos: .userInitiated)
+    private var pollRunning =  false
+    private var pollStop =     false
 
     private override init() {
         super.init()
-        setupAudioSession()
+        setupAudio()
         NotificationCenter.default.addObserver(
             self, selector: #selector(audioInterrupted(_:)),
             name: AVAudioSession.interruptionNotification, object: nil)
     }
 
-    // MARK: - AVAudioSession
+    // MARK: - Audio (keeps process alive)
 
-    private func setupAudioSession() {
+    private func setupAudio() {
         do {
             try AVAudioSession.sharedInstance().setCategory(
                 .playback, mode: .default, options: [.mixWithOthers])
             try AVAudioSession.sharedInstance().setActive(true)
-        } catch { print("[BgDL] AVAudioSession error: \(error)") }
+        } catch { print("[BgDL] audio setup: \(error)") }
     }
 
-    private func startSilentAudio() {
+    private func startAudio() {
         audioPlayer?.stop()
         audioPlayer = nil
         do { try AVAudioSession.sharedInstance().setActive(true) }
-        catch { print("[BgDL] setActive error: \(error)") }
+        catch { print("[BgDL] setActive: \(error)") }
 
-        // 30-second silent WAV — longer loop = fewer potential gap issues
-        let sr = 44100, seconds = 30, ds = sr * seconds * 2
+        // 30-second silent WAV
+        let sr = 44100, secs = 30, ds = sr * secs * 2
         var wav = Data(count: 44 + ds)
         wav.withUnsafeMutableBytes { ptr in
             guard let b = ptr.baseAddress else { return }
             let h: [UInt8] = [
                 0x52,0x49,0x46,0x46,
-                UInt8((ds+36)&0xFF),   UInt8((ds+36)>>8&0xFF),
+                UInt8((ds+36)&0xFF),    UInt8((ds+36)>>8&0xFF),
                 UInt8((ds+36)>>16&0xFF),UInt8((ds+36)>>24&0xFF),
-                0x57,0x41,0x56,0x45,  0x66,0x6D,0x74,0x20,
-                0x10,0x00,0x00,0x00,  0x01,0x00, 0x01,0x00,
-                0x44,0xAC,0x00,0x00,  0x88,0x58,0x01,0x00,
-                0x02,0x00, 0x10,0x00, 0x64,0x61,0x74,0x61,
-                UInt8(ds&0xFF),        UInt8(ds>>8&0xFF),
-                UInt8(ds>>16&0xFF),    UInt8(ds>>24&0xFF)
+                0x57,0x41,0x56,0x45,   0x66,0x6D,0x74,0x20,
+                0x10,0x00,0x00,0x00,   0x01,0x00, 0x01,0x00,
+                0x44,0xAC,0x00,0x00,   0x88,0x58,0x01,0x00,
+                0x02,0x00, 0x10,0x00,  0x64,0x61,0x74,0x61,
+                UInt8(ds&0xFF),         UInt8(ds>>8&0xFF),
+                UInt8(ds>>16&0xFF),     UInt8(ds>>24&0xFF)
             ]
             h.enumerated().forEach {
                 b.storeBytes(of: $0.element, toByteOffset: $0.offset, as: UInt8.self)
@@ -86,62 +82,30 @@ class BackgroundDownloadManager: NSObject {
             audioPlayer?.numberOfLoops = -1
             audioPlayer?.volume = 0.01
             let ok = audioPlayer?.play() ?? false
-            print("[BgDL] Audio started: \(ok)")
-        } catch { print("[BgDL] AVAudioPlayer error: \(error)") }
+            print("[BgDL] audio play: \(ok)")
+        } catch { print("[BgDL] audio error: \(error)") }
     }
 
-    private func stopSilentAudio() {
-        audioPlayer?.stop()
-        audioPlayer = nil
-    }
+    private func stopAudio() { audioPlayer?.stop(); audioPlayer = nil }
 
     @objc private func audioInterrupted(_ n: Notification) {
         guard
             let v = n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-            let t = AVAudioSession.InterruptionType(rawValue: v),
-            t == .ended
+            AVAudioSession.InterruptionType(rawValue: v) == .ended
         else { return }
         lock.lock(); let has = !activeIds.isEmpty; lock.unlock()
-        if has { startSilentAudio() }
-    }
-
-    // MARK: - Heartbeat timer on main queue
-    // Forces the main RunLoop to spin every second.
-    // This drains @MainActor tasks — which is where ActivityKit update() runs.
-    // Without this, the RunLoop might sleep between audio callbacks.
-
-    private func startHeartbeat() {
-        guard heartbeat == nil else { return }
-        let timer = DispatchSource.makeTimerSource(flags: [], queue: DispatchQueue.main)
-        timer.schedule(deadline: .now() + 1, repeating: 1.0, leeway: .milliseconds(100))
-        timer.setEventHandler {
-            // Just waking the main RunLoop is enough — no work needed here.
-            // The act of firing this handler spins the RunLoop which drains
-            // any pending @MainActor tasks including ActivityKit updates.
-        }
-        timer.resume()
-        heartbeat = timer
-        print("[BgDL] Heartbeat started")
-    }
-
-    private func stopHeartbeat() {
-        heartbeat?.cancel()
-        heartbeat = nil
-        print("[BgDL] Heartbeat stopped")
+        if has { startAudio() }
     }
 
     // MARK: - Background task token
 
     private func beginBgTask() {
-        if bgTaskId != .invalid {
-            UIApplication.shared.endBackgroundTask(bgTaskId)
-            bgTaskId = .invalid
-        }
-        bgTaskId = UIApplication.shared.beginBackgroundTask(withName: "gopeed.dl") { [weak self] in
+        if bgTaskId != .invalid { UIApplication.shared.endBackgroundTask(bgTaskId); bgTaskId = .invalid }
+        bgTaskId = UIApplication.shared.beginBackgroundTask(withName: "gopeed") { [weak self] in
             guard let self = self else { return }
             UIApplication.shared.endBackgroundTask(self.bgTaskId)
             self.bgTaskId = .invalid
-            self.beginBgTask()
+            self.beginBgTask() // renew immediately
         }
     }
 
@@ -151,117 +115,88 @@ class BackgroundDownloadManager: NSObject {
         bgTaskId = .invalid
     }
 
-    // MARK: - Poll loop using raw POSIX sockets
-    // URLSession gets suspended when backgrounded. POSIX sockets to 127.0.0.1
-    // use loopback — kernel memory copy, cannot be suspended by iOS.
+    // MARK: - Poll loop (POSIX sockets — cannot be suspended by iOS)
 
     private func startPolling() {
-        guard !isPolling else { return }
-        isPolling = true
-        pollShouldStop = false
+        guard !pollRunning else { return }
+        pollRunning = true
+        pollStop    = false
         pollQueue.async { [weak self] in self?.pollLoop() }
-        print("[BgDL] Poll loop started")
+        print("[BgDL] poll started")
     }
 
-    private func stopPolling() {
-        pollShouldStop = true
-        isPolling = false
-    }
+    private func stopPolling() { pollStop = true; pollRunning = false }
 
     private func pollLoop() {
-        while !pollShouldStop {
-            lock.lock()
-            let has  = !activeIds.isEmpty
-            let port = goPort
-            lock.unlock()
-
+        while !pollStop {
+            lock.lock(); let has = !activeIds.isEmpty; let port = goPort; lock.unlock()
             if has && port > 0 {
-                if let data = rawHttpGet(path: "/api/v1/tasks?status=running", port: port) {
-                    processPollData(data)
+                if let data = rawGet(path: "/api/v1/tasks?status=running", port: port) {
+                    handlePollData(data)
                 }
             }
-
             var tv = timeval(tv_sec: 1, tv_usec: 0)
             select(0, nil, nil, nil, &tv)
         }
-        isPolling = false
-        print("[BgDL] Poll loop exited")
+        pollRunning = false
     }
 
-    private func rawHttpGet(path: String, port: Int) -> Data? {
-        let sock = socket(AF_INET, SOCK_STREAM, 0)
-        guard sock >= 0 else { return nil }
-        defer { close(sock) }
+    // Raw POSIX HTTP GET — loopback only, no URLSession suspension risk
+    private func rawGet(path: String, port: Int) -> Data? {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
 
         var tv = timeval(tv_sec: 2, tv_usec: 0)
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port   = in_port_t(port).bigEndian
         inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr)
 
-        let connected = withUnsafePointer(to: &addr) {
+        let ok = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                connect(sock, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        guard connected == 0 else {
-            print("[BgDL] connect failed: \(errno)")
-            return nil
-        }
+        guard ok == 0 else { print("[BgDL] connect errno=\(errno)"); return nil }
 
         var req = "GET \(path) HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nAccept: application/json\r\nConnection: close\r\n"
         if !apiToken.isEmpty { req += "X-Api-Token: \(apiToken)\r\n" }
         req += "\r\n"
 
-        let bytes = Array(req.utf8)
-        guard bytes.withUnsafeBytes({ send(sock, $0.baseAddress, bytes.count, 0) }) > 0
-        else { return nil }
+        let rb = Array(req.utf8)
+        guard rb.withUnsafeBytes({ send(fd, $0.baseAddress, rb.count, 0) }) > 0 else { return nil }
 
-        var response = Data()
+        var resp = Data()
         var buf = [UInt8](repeating: 0, count: 8192)
-        while true {
-            let n = recv(sock, &buf, buf.count, 0)
-            if n <= 0 { break }
-            response.append(contentsOf: buf[0..<n])
-        }
+        while true { let n = recv(fd, &buf, buf.count, 0); if n <= 0 { break }; resp.append(contentsOf: buf[0..<n]) }
 
-        guard let bodyRange = response.range(of: Data([0x0D,0x0A,0x0D,0x0A]))
-        else { return nil }
-        let body = Data(response[bodyRange.upperBound...])
-
-        if response.range(of: Data("Transfer-Encoding: chunked".utf8)) != nil {
-            return dechunk(body)
-        }
-        return body
+        guard let sep = resp.range(of: Data([0x0D,0x0A,0x0D,0x0A])) else { return nil }
+        let body = Data(resp[sep.upperBound...])
+        return resp.range(of: Data("Transfer-Encoding: chunked".utf8)) != nil ? dechunk(body) : body
     }
 
-    private func dechunk(_ data: Data) -> Data {
-        var result = Data()
-        var i = data.startIndex
-        while i < data.endIndex {
-            guard let nl = data[i...].range(of: Data([0x0D,0x0A])) else { break }
-            let hex = String(data: data[i..<nl.lowerBound], encoding: .utf8) ?? "0"
-            let size = Int(hex.trimmingCharacters(in: .whitespaces), radix: 16) ?? 0
-            if size == 0 { break }
+    private func dechunk(_ d: Data) -> Data {
+        var out = Data(); var i = d.startIndex
+        while i < d.endIndex {
+            guard let nl = d[i...].range(of: Data([0x0D,0x0A])) else { break }
+            let sz = Int(String(data: d[i..<nl.lowerBound], encoding: .utf8)?.trimmingCharacters(in: .whitespaces) ?? "0", radix: 16) ?? 0
+            if sz == 0 { break }
             i = nl.upperBound
-            guard data.index(i, offsetBy: size, limitedBy: data.endIndex) != nil else { break }
-            result.append(data[i..<data.index(i, offsetBy: size)])
-            i = data.index(i, offsetBy: size + 2)
+            guard i + sz <= d.endIndex else { break }
+            out.append(d[i..<d.index(i, offsetBy: sz)]); i = d.index(i, offsetBy: sz + 2)
         }
-        return result
+        return out
     }
 
-    private func processPollData(_ data: Data) {
+    private func handlePollData(_ data: Data) {
         guard
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let arr  = json["data"] as? [[String: Any]]
-        else {
-            print("[BgDL] parse fail: \(String(data: data.prefix(200), encoding: .utf8) ?? "?")")
-            return
-        }
+        else { print("[BgDL] parse error: \(String(data: data.prefix(100), encoding: .utf8) ?? "?")"); return }
 
         lock.lock(); let active = activeIds; lock.unlock()
         let seen = Set(arr.compactMap { $0["id"] as? String })
@@ -278,31 +213,29 @@ class BackgroundDownloadManager: NSObject {
             let total = (res?["size"] as? Int64) ?? Int64((res?["size"] as? Int) ?? 0)
             let frac  = total > 0 ? Double(dl) / Double(total) : 0.0
 
-            print("[BgDL] poll \(id) \(String(format:"%.1f",frac*100))% \(dl)/\(total)")
+            print("[BgDL] \(id) \(String(format:"%.1f",frac*100))%")
             LiveActivityBridge.shared.update(id: id, progress: frac, downloaded: dl, total: total)
 
             lock.lock(); let h = progressHandlers[id]; lock.unlock()
             if let h = h { DispatchQueue.main.async { h(frac, dl, total) } }
         }
 
-        for id in active.subtracting(seen) { verifyAndFinish(id: id) }
+        for id in active.subtracting(seen) { checkFinished(id: id) }
     }
 
-    private func verifyAndFinish(id: String) {
+    private func checkFinished(id: String) {
         lock.lock(); let port = goPort; lock.unlock()
         guard port > 0,
-              let data = rawHttpGet(path: "/api/v1/tasks/\(id)", port: port),
+              let data = rawGet(path: "/api/v1/tasks/\(id)", port: port),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let task = json["data"] as? [String: Any]
         else { return }
-
         let s: Int
-        if      let n = task["status"] as? Int    { s = n }
+        if let n = task["status"] as? Int { s = n }
         else if let str = task["status"] as? String, let n = Int(str) { s = n }
-        else    { return }
-
-        if s == 5      { finishDownload(id: id, failed: false) }
-        else if s == 4 { finishDownload(id: id, failed: true)  }
+        else { return }
+        if s == 5 { finishDownload(id: id, failed: false) }
+        else if s == 4 { finishDownload(id: id, failed: true) }
     }
 
     // MARK: - Public API
@@ -311,79 +244,51 @@ class BackgroundDownloadManager: NSObject {
                           onProgress: @escaping (Double, Int64, Int64) -> Void,
                           onComplete: @escaping (Error?) -> Void) {
         lock.lock()
-        activeIds.insert(id)
-        filenameMap[id] = filename
-        progressHandlers[id] = onProgress
-        completionHandlers[id] = onComplete
+        activeIds.insert(id); filenameMap[id] = filename
+        progressHandlers[id] = onProgress; completionHandlers[id] = onComplete
         lock.unlock()
-
         DispatchQueue.main.async {
-            self.beginBgTask()
-            self.startSilentAudio()
-            self.startPolling()
-            self.startHeartbeat()
+            self.beginBgTask(); self.startAudio(); self.startPolling()
             LiveActivityBridge.shared.start(id: id, filename: filename)
         }
     }
 
     func updateProgress(id: String, progress: Double, downloaded: Int64, total: Int64) {
-        LiveActivityBridge.shared.update(id: id, progress: progress,
-                                         downloaded: downloaded, total: total)
+        LiveActivityBridge.shared.update(id: id, progress: progress, downloaded: downloaded, total: total)
     }
 
-    func completeDownload(id: String, errorMessage: String?) {
-        finishDownload(id: id, failed: errorMessage != nil)
-    }
-
-    func cancelDownload(id: String) { finishDownload(id: id, failed: false) }
+    func completeDownload(id: String, errorMessage: String?) { finishDownload(id: id, failed: errorMessage != nil) }
+    func cancelDownload(id: String)                          { finishDownload(id: id, failed: false) }
 
     func reattach(id: String, onProgress: @escaping (Double, Int64, Int64) -> Void,
                   onComplete: @escaping (Error?) -> Void) {
-        lock.lock()
-        progressHandlers[id] = onProgress
-        completionHandlers[id] = onComplete
-        lock.unlock()
+        lock.lock(); progressHandlers[id] = onProgress; completionHandlers[id] = onComplete; lock.unlock()
     }
 
     private func finishDownload(id: String, failed: Bool) {
         lock.lock()
-        let handler = completionHandlers[id]
-        activeIds.remove(id)
-        filenameMap.removeValue(forKey: id)
-        progressHandlers.removeValue(forKey: id)
-        completionHandlers.removeValue(forKey: id)
-        let remaining = activeIds.count
+        let h = completionHandlers[id]
+        activeIds.remove(id); filenameMap.removeValue(forKey: id)
+        progressHandlers.removeValue(forKey: id); completionHandlers.removeValue(forKey: id)
+        let left = activeIds.count
         lock.unlock()
-
-        if let h = handler {
-            let err: Error? = failed ? NSError(domain: "com.gopeed", code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Download failed"]) : nil
+        if let h = h {
+            let err: Error? = failed ? NSError(domain: "com.gopeed", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed"]) : nil
             DispatchQueue.main.async { h(err) }
         }
         LiveActivityBridge.shared.end(id: id, success: !failed)
-        if remaining == 0 {
-            stopPolling()
-            stopHeartbeat()
-            stopSilentAudio()
-            endBgTask()
-            print("[BgDL] All done")
-        }
+        if left == 0 { stopPolling(); stopAudio(); endBgTask(); print("[BgDL] all done") }
     }
-
-    // MARK: - App lifecycle
 
     func applicationDidEnterBackground() {
         lock.lock(); let has = !activeIds.isEmpty; lock.unlock()
         guard has else { return }
-        beginBgTask()
-        startSilentAudio()
-        startPolling()
-        startHeartbeat()
-        print("[BgDL] Backgrounded — \(activeIds.count) active")
+        beginBgTask(); startAudio(); startPolling()
+        print("[BgDL] backgrounded with \(activeIds.count) active")
     }
 
     func applicationWillEnterForeground() {
         endBgTask()
-        print("[BgDL] Foregrounded")
+        print("[BgDL] foregrounded")
     }
 }
