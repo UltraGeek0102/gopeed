@@ -1,5 +1,4 @@
 // GopeedWidgets/GopeedWidgetsBundle.swift
-// Entry point for the GopeedWidgets extension target.
 
 import WidgetKit
 import SwiftUI
@@ -8,7 +7,8 @@ import SwiftUI
 struct GopeedWidgetsBundle: WidgetBundle {
     var body: some Widget {
         if #available(iOS 16.2, *) {
-            GopeedDownloadWidget()
+            GopeedDownloadTimelineWidget()  // wakes extension to update Live Activities
+            GopeedDownloadWidget()           // Live Activity UI (Dynamic Island + Lock Screen)
         }
     }
 }
