@@ -34,7 +34,18 @@
 			<string>fetch</string>
 			<string>processing</string>
 			<string>voip</string>
+			<string>location</string>
 		</array>
+
+		<!-- ── Location keep-alive (assists background Live Activity updates) ── -->
+		<!-- Significant-location-change monitoring is a secondary signal that
+		     helps keep the app schedulable in background alongside the audio
+		     session. This does not track precise location and is used purely
+		     as an OS-trusted background execution assist. -->
+		<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+		<string>Gopeed uses location changes as a background signal to help keep download progress updates flowing while the app is in the background. Your location is not tracked, stored, or used for any other purpose.</string>
+		<key>NSLocationWhenInUseUsageDescription</key>
+		<string>Gopeed uses location changes as a background signal to help keep download progress updates flowing while the app is in the background. Your location is not tracked, stored, or used for any other purpose.</string>
 
 		<!-- ── Live Activities ──────────────────────────────────────── -->
 		<key>NSSupportsLiveActivities</key>
