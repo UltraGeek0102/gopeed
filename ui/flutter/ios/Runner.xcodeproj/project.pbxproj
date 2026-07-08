@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		DD000001000000000000DD01 /* SharedProgressStore.swift (Runner) in Sources */ = {isa = PBXBuildFile; fileRef = DD000001000000000000DD00 /* SharedProgressStore.swift (Runner) */; };
+		DD000001000000000000DD03 /* SharedProgressStore.swift (GopeedWidgets) in Sources */ = {isa = PBXBuildFile; fileRef = DD000001000000000000DD02 /* SharedProgressStore.swift (GopeedWidgets) */; };
+
 		AA000001000000000000AAA2 /* BackgroundDownloadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000AAA1 /* BackgroundDownloadManager.swift */; };
 		AA000001000000000000AAA4 /* LiveActivityBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000AAA3 /* LiveActivityBridge.swift */; };
 		AA000001000000000000AAA6 /* DownloadActivityAttributes.swift (Runner) in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000AAA5 /* DownloadActivityAttributes.swift */; };
@@ -76,6 +79,10 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		DD000001000000000000DD00 /* SharedProgressStore.swift (Runner) */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SharedProgressStore.swift; sourceTree = "<group>"; };
+		DD000001000000000000DD02 /* SharedProgressStore.swift (GopeedWidgets) */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SharedProgressStore.swift; sourceTree = "<group>"; };
+		DD000001000000000000DD04 /* GopeedWidgets.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = GopeedWidgets.entitlements; sourceTree = "<group>"; };
+
 		AA000001000000000000AAA1 /* BackgroundDownloadManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = BackgroundDownloadManager.swift; sourceTree = "<group>"; };
 		AA000001000000000000AAA3 /* LiveActivityBridge.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = LiveActivityBridge.swift; sourceTree = "<group>"; };
 		AA000001000000000000AAA5 /* DownloadActivityAttributes.swift (Runner) */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = DownloadActivityAttributes.swift; sourceTree = "<group>"; };
@@ -141,6 +148,8 @@
 				BB000001000000000000BBBA /* GopeedDownloadWidget.swift */,
 				BB000001000000000000BBBC /* GopeedWidgetsBundle.swift */,
 				BB000001000000000000BBBE /* DownloadActivityAttributes.swift */,
+				DD000001000000000000DD02 /* SharedProgressStore.swift (GopeedWidgets) */,
+				DD000001000000000000DD04 /* GopeedWidgets.entitlements */,
 				BB000001000000000000BBB0 /* Info.plist */,
 			);
 			path = GopeedWidgets;
@@ -207,6 +216,7 @@
 				AA000001000000000000AAA1 /* BackgroundDownloadManager.swift */,
 				AA000001000000000000AAA3 /* LiveActivityBridge.swift */,
 				AA000001000000000000AAA5 /* DownloadActivityAttributes.swift */,
+				DD000001000000000000DD00 /* SharedProgressStore.swift (Runner) */,
 			);
 			path = Runner;
 			sourceTree = "<group>";
@@ -440,6 +450,7 @@
 				BB000001000000000000BBBB /* GopeedDownloadWidget.swift in Sources */,
 				BB000001000000000000BBBD /* GopeedWidgetsBundle.swift in Sources */,
 				BB000001000000000000BBBF /* DownloadActivityAttributes.swift in Sources */,
+				DD000001000000000000DD03 /* SharedProgressStore.swift (GopeedWidgets) in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -474,6 +485,7 @@
 				AA000001000000000000AAA2 /* BackgroundDownloadManager.swift in Sources */,
 				AA000001000000000000AAA4 /* LiveActivityBridge.swift in Sources */,
 				AA000001000000000000AAA6 /* DownloadActivityAttributes.swift in Sources */,
+				DD000001000000000000DD01 /* SharedProgressStore.swift (Runner) in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -527,6 +539,7 @@
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = GopeedWidgets/GopeedWidgets.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = JH48DS925K;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -553,6 +566,7 @@
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = GopeedWidgets/GopeedWidgets.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = JH48DS925K;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -578,6 +592,7 @@
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = GopeedWidgets/GopeedWidgets.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = JH48DS925K;
 				GENERATE_INFOPLIST_FILE = NO;
