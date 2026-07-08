@@ -1,8 +1,9 @@
 import Foundation
 import UIKit
 import AVFoundation
+import CoreLocation
 
-class BackgroundDownloadManager: NSObject {
+class BackgroundDownloadManager: NSObject, CLLocationManagerDelegate {
 
     static let shared = BackgroundDownloadManager()
     static let pollSessionId = "com.gopeed.gopeed.lapoll"
@@ -51,6 +52,93 @@ class BackgroundDownloadManager: NSObject {
 
     private var audioPlayer: AVAudioPlayer?
     private var bgTaskId: UIBackgroundTaskIdentifier = .invalid
+
+    // MARK: - Location keep-alive (secondary signal alongside audio)
+    // CLLocationManager.startMonitoringSignificantLocationChanges() is a
+    // long-standing, OS-trusted background mode (used by navigation/fitness apps).
+    // Running it alongside the audio session gives the process a second reason
+    // for iOS to keep it schedulable, which in practice seems to help the
+    // cooperative pool stay available for brief windows more often.
+    // This does NOT make updates continuous — it's a best-effort assist.
+    private lazy var locationManager: CLLocationManager = {
+        let m = CLLocationManager()
+        m.delegate = self
+        m.allowsBackgroundLocationUpdates = true
+        m.pausesLocationUpdatesAutomatically = false
+        return m
+    }()
+    private var locationKeepAliveActive = false
+
+    // MARK: - Discrete background poll schedule
+    // Instead of trying to poll every 1s continuously in background (unreliable —
+    // relies on the cooperative pool draining a queued Task every single time),
+    // we schedule a small number of DISCRETE update points using a
+    // DispatchSourceTimer targeting a specific future date. This mirrors the
+    // pattern that's known to work for one-shot/few-shot background LA updates:
+    // ask the OS for very little (a handful of wake events), not a continuous stream.
+    private var backgroundScheduleTimer: DispatchSourceTimer?
+    private let backgroundUpdateInterval: TimeInterval = 20 // seconds between discrete background updates
+
+    private func startLocationKeepAlive() {
+        guard !locationKeepAliveActive else { return }
+        let status = CLLocationManager.authorizationStatus()
+        guard status == .authorizedAlways else {
+            print("[BgDL] location keep-alive skipped — needs Always authorization (have: \(status.rawValue))")
+            return
+        }
+        locationManager.startMonitoringSignificantLocationChanges()
+        locationKeepAliveActive = true
+        print("[BgDL] location keep-alive started")
+    }
+
+    private func stopLocationKeepAlive() {
+        guard locationKeepAliveActive else { return }
+        locationManager.stopMonitoringSignificantLocationChanges()
+        locationKeepAliveActive = false
+        print("[BgDL] location keep-alive stopped")
+    }
+
+    func requestLocationAuthorizationIfNeeded() {
+        let status = CLLocationManager.authorizationStatus()
+        if status == .notDetermined {
+            locationManager.requestAlwaysAuthorization()
+        }
+    }
+
+    // CLLocationManagerDelegate — significant location changes wake us briefly;
+    // use that window to trigger an immediate poll, same as our scheduled timer does.
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        lock.lock(); let has = !activeIds.isEmpty; lock.unlock()
+        if has {
+            print("[BgDL] location update woke us — triggering poll")
+            schedulePollTask()
+        }
+    }
+
+    // MARK: - Discrete background scheduling
+
+    private func startBackgroundSchedule() {
+        stopBackgroundSchedule()
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        timer.schedule(deadline: .now() + backgroundUpdateInterval,
+                       repeating: backgroundUpdateInterval,
+                       leeway: .seconds(2))
+        timer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            self.lock.lock(); let has = !self.activeIds.isEmpty; self.lock.unlock()
+            guard has else { self.stopBackgroundSchedule(); return }
+            print("[BgDL] scheduled background update firing")
+            self.schedulePollTask()
+        }
+        timer.resume()
+        backgroundScheduleTimer = timer
+        print("[BgDL] background schedule started — every \(backgroundUpdateInterval)s")
+    }
+
+    private func stopBackgroundSchedule() {
+        backgroundScheduleTimer?.cancel()
+        backgroundScheduleTimer = nil
+    }
 
     private override init() {
         super.init()
@@ -163,6 +251,7 @@ class BackgroundDownloadManager: NSObject {
         DispatchQueue.main.async {
             self.beginBgTask()
             self.startAudio()
+            self.requestLocationAuthorizationIfNeeded()
             LiveActivityBridge.shared.start(id: id, filename: filename)
             self.schedulePollTask()
         }
@@ -202,11 +291,26 @@ class BackgroundDownloadManager: NSObject {
     func applicationDidEnterBackground() {
         lock.lock(); let has = !activeIds.isEmpty; lock.unlock()
         guard has else { return }
-        beginBgTask(); startAudio()
-        print("[BgDL] backgrounded — background URLSession chain active")
+        beginBgTask(); startAudio(); startLocationKeepAlive()
+        // Switch from continuous 1s polling to discrete scheduled updates —
+        // asking the OS for a handful of wake events is more reliable than
+        // trying to sustain a continuous stream while backgrounded.
+        startBackgroundSchedule()
+        print("[BgDL] backgrounded — audio + location keep-alive, discrete schedule active")
     }
 
-    func applicationWillEnterForeground() { endBgTask() }
+    func applicationWillEnterForeground() {
+        endBgTask()
+        stopLocationKeepAlive()
+        stopBackgroundSchedule()
+        // Immediately fetch fresh progress from the Go engine and push it to the
+        // Live Activity + Flutter UI so there's no stale-state lag on foreground.
+        lock.lock(); let has = !activeIds.isEmpty; lock.unlock()
+        if has {
+            schedulePollTask()
+            print("[BgDL] foregrounded — triggered immediate poll for fresh state")
+        }
+    }
 }
 
 // MARK: - URLSessionDataDelegate
@@ -234,9 +338,12 @@ extension BackgroundDownloadManager: URLSessionDataDelegate {
             processData(data)
         }
 
-        // Schedule next poll (1s delay)
+        // Reschedule immediately ONLY when foregrounded (fast, continuous updates).
+        // When backgrounded, the discrete background schedule timer and location
+        // keep-alive drive the next poll instead — chaining every poll at 1s in
+        // background just queues up cooperative-pool work that may not drain.
         lock.lock(); let has = !activeIds.isEmpty; lock.unlock()
-        if has {
+        if has && UIApplication.shared.applicationState != .background {
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) {
                 self.schedulePollTask()
             }
