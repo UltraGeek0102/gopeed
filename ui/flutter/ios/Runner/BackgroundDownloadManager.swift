@@ -2,6 +2,7 @@ import Foundation
 import UIKit
 import AVFoundation
 import CoreLocation
+import CoreMotion
 
 class BackgroundDownloadManager: NSObject, CLLocationManagerDelegate {
 
@@ -113,6 +114,42 @@ class BackgroundDownloadManager: NSObject, CLLocationManagerDelegate {
             print("[BgDL] location update woke us — triggering poll")
             schedulePollTask()
         }
+    }
+
+    // MARK: - Motion activity keep-alive (3rd signal alongside audio + location)
+    // CMMotionActivityManager's background activity updates use the device's
+    // accelerometer/gyro to detect state changes (still → walking → driving, etc.)
+    // This is a DIFFERENT detection mechanism than location (radio-based), so it
+    // can catch wake opportunities location misses, and vice versa. Like location,
+    // it only fires on a detected state CHANGE, not on a timer — if the phone is
+    // completely still on a desk, this alone won't fire either. Running both
+    // together maximizes the chance of getting occasional background windows.
+    private let motionManager = CMMotionActivityManager()
+    private var motionKeepAliveActive = false
+
+    private func startMotionKeepAlive() {
+        guard !motionKeepAliveActive else { return }
+        guard CMMotionActivityManager.isActivityAvailable() else {
+            print("[BgDL] motion keep-alive unavailable on this device")
+            return
+        }
+        motionManager.startActivityUpdates(to: .main) { [weak self] _ in
+            guard let self = self else { return }
+            self.lock.lock(); let has = !self.activeIds.isEmpty; self.lock.unlock()
+            if has {
+                print("[BgDL] motion activity change woke us — triggering poll")
+                self.schedulePollTask()
+            }
+        }
+        motionKeepAliveActive = true
+        print("[BgDL] motion keep-alive started")
+    }
+
+    private func stopMotionKeepAlive() {
+        guard motionKeepAliveActive else { return }
+        motionManager.stopActivityUpdates()
+        motionKeepAliveActive = false
+        print("[BgDL] motion keep-alive stopped")
     }
 
     // MARK: - Discrete background scheduling
@@ -291,17 +328,18 @@ class BackgroundDownloadManager: NSObject, CLLocationManagerDelegate {
     func applicationDidEnterBackground() {
         lock.lock(); let has = !activeIds.isEmpty; lock.unlock()
         guard has else { return }
-        beginBgTask(); startAudio(); startLocationKeepAlive()
+        beginBgTask(); startAudio(); startLocationKeepAlive(); startMotionKeepAlive()
         // Switch from continuous 1s polling to discrete scheduled updates —
         // asking the OS for a handful of wake events is more reliable than
         // trying to sustain a continuous stream while backgrounded.
         startBackgroundSchedule()
-        print("[BgDL] backgrounded — audio + location keep-alive, discrete schedule active")
+        print("[BgDL] backgrounded — audio + location + motion keep-alive, discrete schedule active")
     }
 
     func applicationWillEnterForeground() {
         endBgTask()
         stopLocationKeepAlive()
+        stopMotionKeepAlive()
         stopBackgroundSchedule()
         // Immediately fetch fresh progress from the Go engine and push it to the
         // Live Activity + Flutter UI so there's no stale-state lag on foreground.

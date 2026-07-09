@@ -47,6 +47,10 @@
 		<key>NSLocationWhenInUseUsageDescription</key>
 		<string>Gopeed uses location changes as a background signal to help keep download progress updates flowing while the app is in the background. Your location is not tracked, stored, or used for any other purpose.</string>
 
+		<!-- ── Motion keep-alive (3rd background signal, alongside location) ── -->
+		<key>NSMotionUsageDescription</key>
+		<string>Gopeed uses motion activity changes as a background signal to help keep download progress updates flowing while the app is in the background. Motion data is not tracked, stored, or used for any other purpose.</string>
+
 		<!-- ── Live Activities ──────────────────────────────────────── -->
 		<key>NSSupportsLiveActivities</key>
 		<true/>
