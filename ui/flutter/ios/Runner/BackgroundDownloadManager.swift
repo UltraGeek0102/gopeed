@@ -1,10 +1,16 @@
 import Foundation
 import UIKit
 import AVFoundation
-import CoreLocation
-import CoreMotion
+import UserNotifications
 
-class BackgroundDownloadManager: NSObject, CLLocationManagerDelegate {
+/// Keeps the Go engine's downloads tracked while the app is backgrounded, and
+/// fires a local notification when each download completes.
+///
+/// No Live Activity, no location/motion tracking — just:
+/// 1. AVAudioSession keeps the process alive so the Go engine keeps downloading
+/// 2. A background URLSession chain polls the Go engine to detect completion
+/// 3. A local notification fires the moment a download finishes
+class BackgroundDownloadManager: NSObject {
 
     static let shared = BackgroundDownloadManager()
     static let pollSessionId = "com.gopeed.gopeed.lapoll"
@@ -28,154 +34,25 @@ class BackgroundDownloadManager: NSObject, CLLocationManagerDelegate {
     private var progressHandlers:   [String: (Double, Int64, Int64) -> Void] = [:]
     private var completionHandlers: [String: (Error?) -> Void] = [:]
 
-    // Background URLSession — managed by iOS nsurlsessiond, NOT suspended with app
+    // Background URLSession — managed by iOS nsurlsessiond, not suspended with app
     private lazy var pollSession: URLSession = {
         let cfg = URLSessionConfiguration.background(withIdentifier: Self.pollSessionId)
         cfg.isDiscretionary = false
         cfg.sessionSendsLaunchEvents = true
         cfg.timeoutIntervalForRequest  = 5
         cfg.timeoutIntervalForResource = 5
-        // IMPORTANT: nil delegateQueue means iOS uses its own internal serial queue
-        // We must NOT block this queue (no semaphores in delegate callbacks)
         return URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
     }()
 
     // Completion handler provided by iOS via handleEventsForBackgroundURLSession.
-    // MUST be called promptly (within ~5s) after all session events are processed.
-    // Calling it tells iOS "we're done, you can suspend us again".
-    // iOS will NOT send the next wake event until this is called.
     var systemCompletionHandler: (() -> Void)?
 
-    // Accumulate data across didReceive calls (background URLSession can split data)
     private var taskData: [Int: Data] = [:]
 
-    // MARK: - Audio keep-alive
+    // MARK: - Audio keep-alive (keeps the Go engine's download running in background)
 
     private var audioPlayer: AVAudioPlayer?
     private var bgTaskId: UIBackgroundTaskIdentifier = .invalid
-
-    // MARK: - Location keep-alive (secondary signal alongside audio)
-    // CLLocationManager.startMonitoringSignificantLocationChanges() is a
-    // long-standing, OS-trusted background mode (used by navigation/fitness apps).
-    // Running it alongside the audio session gives the process a second reason
-    // for iOS to keep it schedulable, which in practice seems to help the
-    // cooperative pool stay available for brief windows more often.
-    // This does NOT make updates continuous — it's a best-effort assist.
-    private lazy var locationManager: CLLocationManager = {
-        let m = CLLocationManager()
-        m.delegate = self
-        m.allowsBackgroundLocationUpdates = true
-        m.pausesLocationUpdatesAutomatically = false
-        return m
-    }()
-    private var locationKeepAliveActive = false
-
-    // MARK: - Discrete background poll schedule
-    // Instead of trying to poll every 1s continuously in background (unreliable —
-    // relies on the cooperative pool draining a queued Task every single time),
-    // we schedule a small number of DISCRETE update points using a
-    // DispatchSourceTimer targeting a specific future date. This mirrors the
-    // pattern that's known to work for one-shot/few-shot background LA updates:
-    // ask the OS for very little (a handful of wake events), not a continuous stream.
-    private var backgroundScheduleTimer: DispatchSourceTimer?
-    private let backgroundUpdateInterval: TimeInterval = 20 // seconds between discrete background updates
-
-    private func startLocationKeepAlive() {
-        guard !locationKeepAliveActive else { return }
-        let status = CLLocationManager.authorizationStatus()
-        guard status == .authorizedAlways else {
-            print("[BgDL] location keep-alive skipped — needs Always authorization (have: \(status.rawValue))")
-            return
-        }
-        locationManager.startMonitoringSignificantLocationChanges()
-        locationKeepAliveActive = true
-        print("[BgDL] location keep-alive started")
-    }
-
-    private func stopLocationKeepAlive() {
-        guard locationKeepAliveActive else { return }
-        locationManager.stopMonitoringSignificantLocationChanges()
-        locationKeepAliveActive = false
-        print("[BgDL] location keep-alive stopped")
-    }
-
-    func requestLocationAuthorizationIfNeeded() {
-        let status = CLLocationManager.authorizationStatus()
-        if status == .notDetermined {
-            locationManager.requestAlwaysAuthorization()
-        }
-    }
-
-    // CLLocationManagerDelegate — significant location changes wake us briefly;
-    // use that window to trigger an immediate poll, same as our scheduled timer does.
-    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        lock.lock(); let has = !activeIds.isEmpty; lock.unlock()
-        if has {
-            print("[BgDL] location update woke us — triggering poll")
-            schedulePollTask()
-        }
-    }
-
-    // MARK: - Motion activity keep-alive (3rd signal alongside audio + location)
-    // CMMotionActivityManager's background activity updates use the device's
-    // accelerometer/gyro to detect state changes (still → walking → driving, etc.)
-    // This is a DIFFERENT detection mechanism than location (radio-based), so it
-    // can catch wake opportunities location misses, and vice versa. Like location,
-    // it only fires on a detected state CHANGE, not on a timer — if the phone is
-    // completely still on a desk, this alone won't fire either. Running both
-    // together maximizes the chance of getting occasional background windows.
-    private let motionManager = CMMotionActivityManager()
-    private var motionKeepAliveActive = false
-
-    private func startMotionKeepAlive() {
-        guard !motionKeepAliveActive else { return }
-        guard CMMotionActivityManager.isActivityAvailable() else {
-            print("[BgDL] motion keep-alive unavailable on this device")
-            return
-        }
-        motionManager.startActivityUpdates(to: .main) { [weak self] _ in
-            guard let self = self else { return }
-            self.lock.lock(); let has = !self.activeIds.isEmpty; self.lock.unlock()
-            if has {
-                print("[BgDL] motion activity change woke us — triggering poll")
-                self.schedulePollTask()
-            }
-        }
-        motionKeepAliveActive = true
-        print("[BgDL] motion keep-alive started")
-    }
-
-    private func stopMotionKeepAlive() {
-        guard motionKeepAliveActive else { return }
-        motionManager.stopActivityUpdates()
-        motionKeepAliveActive = false
-        print("[BgDL] motion keep-alive stopped")
-    }
-
-    // MARK: - Discrete background scheduling
-
-    private func startBackgroundSchedule() {
-        stopBackgroundSchedule()
-        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
-        timer.schedule(deadline: .now() + backgroundUpdateInterval,
-                       repeating: backgroundUpdateInterval,
-                       leeway: .seconds(2))
-        timer.setEventHandler { [weak self] in
-            guard let self = self else { return }
-            self.lock.lock(); let has = !self.activeIds.isEmpty; self.lock.unlock()
-            guard has else { self.stopBackgroundSchedule(); return }
-            print("[BgDL] scheduled background update firing")
-            self.schedulePollTask()
-        }
-        timer.resume()
-        backgroundScheduleTimer = timer
-        print("[BgDL] background schedule started — every \(backgroundUpdateInterval)s")
-    }
-
-    private func stopBackgroundSchedule() {
-        backgroundScheduleTimer?.cancel()
-        backgroundScheduleTimer = nil
-    }
 
     private override init() {
         super.init()
@@ -183,6 +60,7 @@ class BackgroundDownloadManager: NSObject, CLLocationManagerDelegate {
         NotificationCenter.default.addObserver(
             self, selector: #selector(audioInterrupted(_:)),
             name: AVAudioSession.interruptionNotification, object: nil)
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
     private func setupAudio() {
@@ -253,6 +131,10 @@ class BackgroundDownloadManager: NSObject, CLLocationManagerDelegate {
     }
 
     // MARK: - Poll scheduling
+    // Polls the Go engine to detect progress/completion. In foreground this
+    // chains every ~1s for live progress in the app UI. In background it just
+    // needs to catch completion eventually — the download itself keeps running
+    // via the Go engine regardless of how often we poll.
 
     func schedulePollTask() {
         lock.lock()
@@ -273,7 +155,6 @@ class BackgroundDownloadManager: NSObject, CLLocationManagerDelegate {
         let task = pollSession.dataTask(with: req)
         taskData[task.taskIdentifier] = Data()
         task.resume()
-        print("[BgDL] poll task \(task.taskIdentifier) scheduled")
     }
 
     // MARK: - Public API
@@ -288,21 +169,27 @@ class BackgroundDownloadManager: NSObject, CLLocationManagerDelegate {
         DispatchQueue.main.async {
             self.beginBgTask()
             self.startAudio()
-            self.requestLocationAuthorizationIfNeeded()
-            LiveActivityBridge.shared.start(id: id, filename: filename)
             self.schedulePollTask()
         }
     }
 
     func updateProgress(id: String, progress: Double, downloaded: Int64, total: Int64) {
-        LiveActivityBridge.shared.update(id: id, progress: progress,
-                                         downloaded: downloaded, total: total)
+        // No-op hook retained for API compatibility with the Flutter side.
     }
 
     func completeDownload(id: String, errorMessage: String?) {
         finishDownload(id: id, failed: errorMessage != nil)
     }
-    func cancelDownload(id: String) { finishDownload(id: id, failed: false) }
+    func cancelDownload(id: String) {
+        lock.lock()
+        activeIds.remove(id)
+        filenameMap.removeValue(forKey: id)
+        progressHandlers.removeValue(forKey: id)
+        completionHandlers.removeValue(forKey: id)
+        let left = activeIds.count
+        lock.unlock()
+        if left == 0 { stopAudio(); endBgTask() }
+    }
 
     func reattach(id: String, onProgress: @escaping (Double, Int64, Int64) -> Void,
                   onComplete: @escaping (Error?) -> Void) {
@@ -312,37 +199,54 @@ class BackgroundDownloadManager: NSObject, CLLocationManagerDelegate {
     private func finishDownload(id: String, failed: Bool) {
         lock.lock()
         let h = completionHandlers[id]
+        let filename = filenameMap[id] ?? "Download"
         activeIds.remove(id); filenameMap.removeValue(forKey: id)
         progressHandlers.removeValue(forKey: id); completionHandlers.removeValue(forKey: id)
         let left = activeIds.count
         lock.unlock()
+
         if let h = h {
             let err: Error? = failed ? NSError(domain: "com.gopeed", code: -1,
                 userInfo: [NSLocalizedDescriptionKey: "Failed"]) : nil
             DispatchQueue.main.async { h(err) }
         }
-        LiveActivityBridge.shared.end(id: id, success: !failed)
+
+        notifyDownloadFinished(filename: filename, failed: failed)
+
         if left == 0 { stopAudio(); endBgTask(); print("[BgDL] all done") }
     }
+
+    // MARK: - Local notification
+
+    private func notifyDownloadFinished(filename: String, failed: Bool) {
+        let content = UNMutableNotificationContent()
+        content.title = failed ? "Download failed" : "Download complete"
+        content.body  = filename
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: "gopeed-download-\(UUID().uuidString)",
+            content: content,
+            trigger: nil  // deliver immediately
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error = error {
+                print("[BgDL] notification error: \(error)")
+            }
+        }
+    }
+
+    // MARK: - App lifecycle
 
     func applicationDidEnterBackground() {
         lock.lock(); let has = !activeIds.isEmpty; lock.unlock()
         guard has else { return }
-        beginBgTask(); startAudio(); startLocationKeepAlive(); startMotionKeepAlive()
-        // Switch from continuous 1s polling to discrete scheduled updates —
-        // asking the OS for a handful of wake events is more reliable than
-        // trying to sustain a continuous stream while backgrounded.
-        startBackgroundSchedule()
-        print("[BgDL] backgrounded — audio + location + motion keep-alive, discrete schedule active")
+        beginBgTask(); startAudio()
+        print("[BgDL] backgrounded — \(activeIds.count) active downloads, audio keep-alive on")
     }
 
     func applicationWillEnterForeground() {
         endBgTask()
-        stopLocationKeepAlive()
-        stopMotionKeepAlive()
-        stopBackgroundSchedule()
-        // Immediately fetch fresh progress from the Go engine and push it to the
-        // Live Activity + Flutter UI so there's no stale-state lag on foreground.
         lock.lock(); let has = !activeIds.isEmpty; lock.unlock()
         if has {
             schedulePollTask()
@@ -355,31 +259,24 @@ class BackgroundDownloadManager: NSObject, CLLocationManagerDelegate {
 
 extension BackgroundDownloadManager: URLSessionDataDelegate {
 
-    // Accumulate data (background URLSession may deliver in chunks)
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
                     didReceive data: Data) {
         taskData[dataTask.taskIdentifier, default: Data()].append(data)
     }
 
-    // Task complete — process accumulated data, schedule next poll, signal iOS
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     didCompleteWithError error: Error?) {
-
-        defer {
-            taskData.removeValue(forKey: task.taskIdentifier)
-        }
+        defer { taskData.removeValue(forKey: task.taskIdentifier) }
 
         if let e = error {
             print("[BgDL] poll error: \(e)")
         } else if let data = taskData[task.taskIdentifier], !data.isEmpty {
-            print("[BgDL] poll complete: \(data.count) bytes")
             processData(data)
         }
 
-        // Reschedule immediately ONLY when foregrounded (fast, continuous updates).
-        // When backgrounded, the discrete background schedule timer and location
-        // keep-alive drive the next poll instead — chaining every poll at 1s in
-        // background just queues up cooperative-pool work that may not drain.
+        // Reschedule continuously while foregrounded for live progress in the app UI.
+        // While backgrounded, rely on the next natural background URLSession wake
+        // (iOS decides timing) rather than trying to force a fixed cadence.
         lock.lock(); let has = !activeIds.isEmpty; lock.unlock()
         if has && UIApplication.shared.applicationState != .background {
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) {
@@ -387,15 +284,10 @@ extension BackgroundDownloadManager: URLSessionDataDelegate {
             }
         }
 
-        // Signal iOS that we've finished handling this background event.
-        // This MUST be called promptly — iOS won't wake us again until it is.
-        // Do it here (not in urlSessionDidFinishEvents) so it fires per-task.
         callSystemCompletionHandler()
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
-        print("[BgDL] urlSessionDidFinishEvents")
-        // Belt-and-suspenders: also call from here in case didCompleteWithError missed it
         callSystemCompletionHandler()
     }
 
@@ -404,7 +296,6 @@ extension BackgroundDownloadManager: URLSessionDataDelegate {
             guard let h = self.systemCompletionHandler else { return }
             self.systemCompletionHandler = nil
             h()
-            print("[BgDL] systemCompletionHandler called")
         }
     }
 
@@ -412,12 +303,10 @@ extension BackgroundDownloadManager: URLSessionDataDelegate {
         guard
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let arr  = json["data"] as? [[String: Any]]
-        else {
-            print("[BgDL] JSON parse failed: \(String(data: data.prefix(200), encoding: .utf8) ?? "?")")
-            return
-        }
+        else { return }
 
         lock.lock(); let active = activeIds; lock.unlock()
+        let stillRunning = Set(arr.compactMap { $0["id"] as? String })
 
         for t in arr {
             guard
@@ -431,13 +320,41 @@ extension BackgroundDownloadManager: URLSessionDataDelegate {
             let total = (res?["size"] as? Int64) ?? Int64((res?["size"] as? Int) ?? 0)
             let frac  = total > 0 ? Double(dl) / Double(total) : 0.0
 
-            print("[BgDL] \(id) \(String(format:"%.1f",frac*100))% (\(dl)/\(total))")
-
-            // Fire-and-forget — returns immediately, does NOT block delegate queue
-            LiveActivityBridge.shared.update(id: id, progress: frac, downloaded: dl, total: total)
-
             lock.lock(); let h = progressHandlers[id]; lock.unlock()
             if let h = h { DispatchQueue.main.async { h(frac, dl, total) } }
         }
+
+        // Any tracked id no longer in the "running" list has finished or errored —
+        // check its actual status and fire the completion notification.
+        for id in active.subtracting(stillRunning) {
+            checkFinalStatus(id: id)
+        }
+    }
+
+    /// A task that dropped out of the "running" list needs one more check to
+    /// find out whether it finished successfully or errored, so we can show
+    /// the right notification.
+    private func checkFinalStatus(id: String) {
+        lock.lock(); let port = goPort; lock.unlock()
+        guard port > 0, let url = URL(string: "http://127.0.0.1:\(port)/api/v1/tasks/\(id)") else {
+            finishDownload(id: id, failed: false)
+            return
+        }
+        var req = URLRequest(url: url)
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        if !apiToken.isEmpty { req.setValue(apiToken, forHTTPHeaderField: "X-Api-Token") }
+        req.timeoutInterval = 4
+
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            guard let self = self else { return }
+            var failed = false
+            if let data = data,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let task = json["data"] as? [String: Any],
+               let status = task["status"] as? String {
+                failed = (status == "error")
+            }
+            self.finishDownload(id: id, failed: failed)
+        }.resume()
     }
 }
