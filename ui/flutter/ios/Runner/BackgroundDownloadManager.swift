@@ -49,6 +49,27 @@ class BackgroundDownloadManager: NSObject {
 
     private var taskData: [Int: Data] = [:]
 
+    // Prevents overlapping poll requests from piling up against the Go engine's
+    // TCP listener. Without this, foreground 1s chaining + foreground triggers +
+    // background wake events can all fire schedulePollTask() concurrently,
+    // saturating the Go server's connection queue until it stops responding
+    // (surfacing as "REQUEST TIMEOUT" on unrelated new requests) until the
+    // process is killed and relaunched.
+    private var pollInFlight = false
+
+    // Tracks ids currently being checked via checkFinalStatus so a task that
+    // drops out of the "running" list on two consecutive polls (a normal race,
+    // since checkFinalStatus is async) doesn't fire two overlapping status
+    // checks — and doesn't risk finishDownload running twice for the same id.
+    private var checkingFinalStatus: Set<String> = []
+
+    // Maps a URLSessionTask.taskIdentifier to the download id it's checking the
+    // final status of. Background URLSessionConfiguration does not support
+    // completion-handler-based tasks, so final-status checks must also go
+    // through the shared delegate — this lets didCompleteWithError tell them
+    // apart from regular /tasks?status=running polls.
+    private var finalStatusTaskIds: [Int: String] = [:]
+
     // MARK: - Audio keep-alive (keeps the Go engine's download running in background)
 
     private var audioPlayer: AVAudioPlayer?
@@ -140,13 +161,27 @@ class BackgroundDownloadManager: NSObject {
         lock.lock()
         let has  = !activeIds.isEmpty
         let port = goPort
+        let inFlight = pollInFlight
+        if has && port > 0 && !inFlight {
+            pollInFlight = true
+        }
         lock.unlock()
+
         guard has, port > 0 else {
             print("[BgDL] no active downloads or port not set, skip poll")
             return
         }
+        guard !inFlight else {
+            // A poll is already outstanding — skip this trigger rather than
+            // stacking another request on top of it.
+            print("[BgDL] poll already in flight, skipping")
+            return
+        }
 
-        guard let url = URL(string: "http://127.0.0.1:\(port)/api/v1/tasks?status=running") else { return }
+        guard let url = URL(string: "http://127.0.0.1:\(port)/api/v1/tasks?status=running") else {
+            lock.lock(); pollInFlight = false; lock.unlock()
+            return
+        }
         var req = URLRequest(url: url)
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         if !apiToken.isEmpty { req.setValue(apiToken, forHTTPHeaderField: "X-Api-Token") }
@@ -266,11 +301,30 @@ extension BackgroundDownloadManager: URLSessionDataDelegate {
 
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     didCompleteWithError error: Error?) {
+        let completedData = taskData[task.taskIdentifier]
         defer { taskData.removeValue(forKey: task.taskIdentifier) }
 
+        lock.lock()
+        let finalStatusId = finalStatusTaskIds.removeValue(forKey: task.taskIdentifier)
+        // Only the regular polling path (not final-status checks) holds the
+        // in-flight guard, since final-status checks are already de-duplicated
+        // per-id via checkingFinalStatus and should not block the next poll.
+        if finalStatusId == nil { pollInFlight = false }
+        lock.unlock()
+
         if let e = error {
-            print("[BgDL] poll error: \(e)")
-        } else if let data = taskData[task.taskIdentifier], !data.isEmpty {
+            print("[BgDL] task error: \(e)")
+            if let id = finalStatusId {
+                // Treat a network error on the status check as inconclusive —
+                // don't mark it failed just because the check itself timed out.
+                lock.lock(); checkingFinalStatus.remove(id); lock.unlock()
+            }
+            return
+        }
+
+        if let id = finalStatusId {
+            handleFinalStatusResponse(id: id, data: completedData)
+        } else if let data = completedData, !data.isEmpty {
             processData(data)
         }
 
@@ -333,10 +387,23 @@ extension BackgroundDownloadManager: URLSessionDataDelegate {
 
     /// A task that dropped out of the "running" list needs one more check to
     /// find out whether it finished successfully or errored, so we can show
-    /// the right notification.
+    /// the right notification. De-duplicated per id since processData can run
+    /// again (a normal race with the async check below) before the first
+    /// check has resolved and removed the id from activeIds.
+    ///
+    /// Uses the same delegate-based pollSession as regular polls — background
+    /// URLSessionConfiguration does not support completion-handler-based tasks,
+    /// so this must be routed through didReceive/didCompleteWithError like
+    /// every other request on this session.
     private func checkFinalStatus(id: String) {
-        lock.lock(); let port = goPort; lock.unlock()
+        lock.lock()
+        guard !checkingFinalStatus.contains(id) else { lock.unlock(); return }
+        checkingFinalStatus.insert(id)
+        let port = goPort
+        lock.unlock()
+
         guard port > 0, let url = URL(string: "http://127.0.0.1:\(port)/api/v1/tasks/\(id)") else {
+            lock.lock(); checkingFinalStatus.remove(id); lock.unlock()
             finishDownload(id: id, failed: false)
             return
         }
@@ -345,16 +412,22 @@ extension BackgroundDownloadManager: URLSessionDataDelegate {
         if !apiToken.isEmpty { req.setValue(apiToken, forHTTPHeaderField: "X-Api-Token") }
         req.timeoutInterval = 4
 
-        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
-            guard let self = self else { return }
-            var failed = false
-            if let data = data,
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let task = json["data"] as? [String: Any],
-               let status = task["status"] as? String {
-                failed = (status == "error")
-            }
-            self.finishDownload(id: id, failed: failed)
-        }.resume()
+        let task = pollSession.dataTask(with: req)
+        taskData[task.taskIdentifier] = Data()
+        lock.lock(); finalStatusTaskIds[task.taskIdentifier] = id; lock.unlock()
+        task.resume()
+    }
+
+    /// Called from didCompleteWithError once a final-status-check task finishes.
+    private func handleFinalStatusResponse(id: String, data: Data?) {
+        var failed = false
+        if let data = data,
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let task = json["data"] as? [String: Any],
+           let status = task["status"] as? String {
+            failed = (status == "error")
+        }
+        lock.lock(); checkingFinalStatus.remove(id); lock.unlock()
+        finishDownload(id: id, failed: failed)
     }
 }
