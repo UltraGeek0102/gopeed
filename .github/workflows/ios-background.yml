@@ -8,6 +8,8 @@ on:
       - 'ui/flutter/lib/**'
       - 'ui/flutter/pubspec.yaml'
       - 'bind/mobile/**'
+      - 'pkg/**'
+      - 'internal/**'
       - '.github/workflows/ios-background.yml'
       - 'scripts/patch_pbxproj.py'
   workflow_dispatch:
@@ -53,24 +55,15 @@ jobs:
           cache: true
 
       # ── 4. Sync widget version from pubspec ───────────────────────────────────
-      # Sideloaders (Feather, SideStore) don't expand $(FLUTTER_BUILD_NAME) variables.
-      # We hardcode real values into GopeedWidgets/Info.plist so the extension
-      # bundle is always valid — otherwise iOS refuses to install it.
       - name: Sync widget bundle version
         run: |
           PUBSPEC="ui/flutter/pubspec.yaml"
           WIDGET_PLIST="ui/flutter/ios/GopeedWidgets/Info.plist"
-
-          # Extract version string e.g. "1.9.3+1"
           VERSION_LINE=$(grep '^version:' "$PUBSPEC" | head -1)
           BUILD_NAME=$(echo "$VERSION_LINE" | sed 's/version: //' | cut -d'+' -f1 | tr -d '[:space:]')
           BUILD_NUMBER=$(echo "$VERSION_LINE" | sed 's/version: //' | cut -d'+' -f2 | tr -d '[:space:]')
-
-          # Fallback if no + suffix
           [ -z "$BUILD_NUMBER" ] && BUILD_NUMBER="1"
-
           echo "Setting widget version: $BUILD_NAME ($BUILD_NUMBER)"
-
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $BUILD_NAME" "$WIDGET_PLIST"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$WIDGET_PLIST"
 
@@ -111,6 +104,20 @@ jobs:
             -target=ios \
             github.com/GopeedLab/gopeed/bind/mobile
 
+      # ── 8b. Verify framework is present ───────────────────────────────────────
+      # Guards against a silent failure mode: if the cache step ever restores
+      # stale content (or the build step is accidentally skipped), the rest of
+      # the pipeline would otherwise proceed and quietly ship an old engine.
+      - name: Verify xcframework present
+        run: |
+          FW="ui/flutter/ios/Frameworks/Libgopeed.xcframework"
+          if [ ! -d "$FW" ]; then
+            echo "::error::Libgopeed.xcframework missing after build/cache step"
+            exit 1
+          fi
+          echo "xcframework present: $(find "$FW" -type f | wc -l) files"
+          echo "Cache hit: ${{ steps.cache-xcfw.outputs.cache-hit }}"
+
       # ── 9. Build (unsigned) ───────────────────────────────────────────────────
       - name: Build iOS (no codesign)
         working-directory: ui/flutter
@@ -120,8 +127,6 @@ jobs:
             --dart-define="UPDATE_CHANNEL=iosIpa"
 
       # ── 10. Inject real version strings into built app extension ──────────────
-      # flutter build copies the source Info.plist but may still leave variables
-      # unexpanded in the .appex. We patch the built copy to be certain.
       - name: Fix appex bundle version
         working-directory: ui/flutter
         run: |
@@ -132,12 +137,9 @@ jobs:
             BUILD_NAME=$(echo "$VERSION_LINE" | sed 's/version: //' | cut -d'+' -f1 | tr -d '[:space:]')
             BUILD_NUMBER=$(echo "$VERSION_LINE" | sed 's/version: //' | cut -d'+' -f2 | tr -d '[:space:]')
             [ -z "$BUILD_NUMBER" ] && BUILD_NUMBER="1"
-
             echo "Patching built appex: $BUILD_NAME ($BUILD_NUMBER)"
             /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $BUILD_NAME" "$APPEX"
             /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$APPEX"
-
-            # Also replace any remaining $(FLUTTER_BUILD_*) literals
             /usr/bin/plutil -convert xml1 "$APPEX"
             sed -i '' \
               "s|\$(FLUTTER_BUILD_NAME)|$BUILD_NAME|g;
@@ -148,7 +150,6 @@ jobs:
                s|\$(PRODUCT_NAME)|GopeedWidgets|g;
                s|\$(PRODUCT_BUNDLE_PACKAGE_TYPE)|XPC!|g" \
               "$APPEX"
-
             echo "appex Info.plist after patch:"
             cat "$APPEX"
           else
