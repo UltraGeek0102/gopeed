@@ -23,67 +23,59 @@ import 'model/update_check_extension_resp.dart';
 import 'model/update_extension_settings.dart';
 
 class _Client {
-  static _Client? _instance;
-
   late Dio dio;
 
-  _Client._internal();
-
-  factory _Client(String network, String address, String apiToken) {
-    if (_instance == null) {
-      _instance = _Client._internal();
-      var dio = Dio();
-      final isUnixSocket = network == 'unix';
-      var baseUrl = 'http://127.0.0.1/';
-      if (!isUnixSocket) {
-        if (Util.isWeb()) {
-          baseUrl = kDebugMode ? 'http://127.0.0.1:9999/' : '';
-        } else {
-          baseUrl = 'http://$address/';
-        }
-      }
-      dio.options.baseUrl = baseUrl;
-      dio.options.contentType = Headers.jsonContentType;
-      dio.options.sendTimeout = const Duration(seconds: 5);
-      dio.options.connectTimeout = const Duration(seconds: 5);
-      dio.options.receiveTimeout = const Duration(seconds: 120);
-      dio.interceptors.add(InterceptorsWrapper(
-        onRequest: (options, handler) {
-          if (apiToken.isNotEmpty) {
-            options.headers['X-Api-Token'] = apiToken;
-          }
-          if (Util.isWeb()) {
-            final token = Database.instance.getWebToken();
-            if (token != null) {
-              options.headers['Authorization'] = 'Bearer $token';
-            }
-          }
-          handler.next(options);
-        },
-        onError: (error, handler) {
-          // Only web version has a login page
-          if (Util.isWeb() && error.response?.statusCode == 401) {
-            getx.Get.rootDelegate.offAndToNamed(Routes.LOGIN);
-          }
-          handler.next(error);
-        },
-      ));
-
-      _instance!.dio = dio;
-      if (isUnixSocket) {
-        (_instance!.dio.httpClientAdapter as IOHttpClientAdapter)
-            .createHttpClient = () {
-          final client = HttpClient();
-          client.connectionFactory =
-              (Uri uri, String? proxyHost, int? proxyPort) {
-            return Socket.startConnect(
-                InternetAddress(address, type: InternetAddressType.unix), 0);
-          };
-          return client;
-        };
+  _Client(String network, String address, String apiToken) {
+    var dio = Dio();
+    final isUnixSocket = network == 'unix';
+    var baseUrl = 'http://127.0.0.1/';
+    if (!isUnixSocket) {
+      if (Util.isWeb()) {
+        baseUrl = kDebugMode ? 'http://127.0.0.1:9999/' : '';
+      } else {
+        baseUrl = 'http://$address/';
       }
     }
-    return _instance!;
+    dio.options.baseUrl = baseUrl;
+    dio.options.contentType = Headers.jsonContentType;
+    dio.options.sendTimeout = const Duration(seconds: 5);
+    dio.options.connectTimeout = const Duration(seconds: 5);
+    dio.options.receiveTimeout = const Duration(seconds: 120);
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        if (apiToken.isNotEmpty) {
+          options.headers['X-Api-Token'] = apiToken;
+        }
+        if (Util.isWeb()) {
+          final token = Database.instance.getWebToken();
+          if (token != null) {
+            options.headers['Authorization'] = 'Bearer $token';
+          }
+        }
+        handler.next(options);
+      },
+      onError: (error, handler) {
+        // Only web version has a login page
+        if (Util.isWeb() && error.response?.statusCode == 401) {
+          getx.Get.rootDelegate.offAndToNamed(Routes.LOGIN);
+        }
+        handler.next(error);
+      },
+    ));
+
+    this.dio = dio;
+    if (isUnixSocket) {
+      (this.dio.httpClientAdapter as IOHttpClientAdapter).createHttpClient =
+          () {
+        final client = HttpClient();
+        client.connectionFactory =
+            (Uri uri, String? proxyHost, int? proxyPort) {
+          return Socket.startConnect(
+              InternetAddress(address, type: InternetAddressType.unix), 0);
+        };
+        return client;
+      };
+    }
   }
 }
 
@@ -94,9 +86,49 @@ class TimeoutException implements Exception {
 }
 
 late _Client _client;
+// Remember the last-used connection params so reinit() can be called with
+// no arguments after a health-check failure, rebuilding against the same
+// address the engine is (or was) actually running on.
+String _lastNetwork = '';
+String _lastAddress = '';
+String _lastApiToken = '';
 
 void init(String network, String address, String apiToken) {
+  _lastNetwork = network;
+  _lastAddress = address;
+  _lastApiToken = apiToken;
   _client = _Client(network, address, apiToken);
+}
+
+/// Rebuilds the Dio client against a (possibly new) address. Call this after
+/// restarting the Go engine following a health-check failure, so subsequent
+/// API calls go to the fresh port instead of a dead cached connection.
+///
+/// If [address] is omitted, rebuilds against the last-known address — useful
+/// just to get a brand new Dio/HttpClient instance in case the underlying
+/// platform socket state (not just the address) has gone stale, which can
+/// happen after iOS suspends and resumes the app's network stack.
+void reinit({String? network, String? address, String? apiToken}) {
+  _lastNetwork = network ?? _lastNetwork;
+  _lastAddress = address ?? _lastAddress;
+  _lastApiToken = apiToken ?? _lastApiToken;
+  _client = _Client(_lastNetwork, _lastAddress, _lastApiToken);
+}
+
+/// Quick liveness check against the Go engine with a short timeout, distinct
+/// from the normal 120s receiveTimeout used for real API calls. Returns false
+/// on ANY failure (timeout, connection refused, etc) rather than throwing,
+/// so callers can use this purely as a yes/no signal before deciding whether
+/// to restart the engine.
+Future<bool> isReachable({Duration timeout = const Duration(seconds: 3)}) async {
+  try {
+    await _client.dio
+        .get("/api/v1/tasks", queryParameters: {"status": "done"})
+        .timeout(timeout);
+    return true;
+  } catch (_) {
+    return false;
+  }
 }
 
 Future<T> _parse<T>(
