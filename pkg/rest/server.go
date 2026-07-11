@@ -252,12 +252,31 @@ func BuildServer(startCfg *model.StartConfig) (*http.Server, net.Listener, error
 		})
 	})
 
-	srv = &http.Server{Handler: handlers.CORS(
-		handlers.AllowedHeaders([]string{"Content-Type", "Authorization", "X-Api-Token", "X-Target-Uri"}),
-		handlers.AllowedMethods([]string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}),
-		handlers.AllowedOrigins([]string{"*"}),
-		handlers.AllowCredentials(),
-	)(r)}
+	srv = &http.Server{
+		Handler: handlers.CORS(
+			handlers.AllowedHeaders([]string{"Content-Type", "Authorization", "X-Api-Token", "X-Target-Uri"}),
+			handlers.AllowedMethods([]string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}),
+			handlers.AllowedOrigins([]string{"*"}),
+			handlers.AllowCredentials(),
+		)(r),
+		// Without these, Go's net/http server has NO default timeouts: a
+		// connection abandoned mid-request (e.g. an iOS background URLSession
+		// task suspended by the OS rather than cleanly closed) stays open
+		// indefinitely, slowly exhausting file descriptors / the accept
+		// queue until the server stops accepting new connections entirely —
+		// surfacing client-side as connect-timeout errors on unrelated
+		// requests. These bound how long any connection/request can sit
+		// idle or in-flight before the server reclaims it.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		// This server only ever sends small JSON control-plane responses
+		// (task status, progress, etc) — actual downloaded file bytes are
+		// written to disk by the Go download engine directly, never streamed
+		// through this HTTP server. A bounded WriteTimeout is therefore safe
+		// and helps reclaim connections stuck writing a response.
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
 	return srv, listener, nil
 }
 
