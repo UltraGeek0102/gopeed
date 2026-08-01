@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1482,6 +1483,71 @@ func (f *Fetcher) waitForCompletion() {
 	}
 }
 
+// verifyFullCoverage checks that every byte in [0, Size) was actually
+// downloaded, by examining each connection's final chunk range rather than
+// trusting a summed byte count. A summed count can be satisfied even when a
+// range was never written (masked by another range being double-counted due
+// to an overlapping/duplicate write elsewhere), so this is the authoritative
+// completeness check — totalDownloaded is only a fast pre-check, not proof.
+//
+// Must be called with f.connMu already held.
+func (f *Fetcher) verifyFullCoverage() (ok bool, missingRanges []string) {
+	if f.meta.Res.Size <= 0 || !f.meta.Res.Range {
+		// Non-range or unknown-size downloads have exactly one connection
+		// covering the whole file; the existing Completed/State check is
+		// already authoritative for that case.
+		return true, nil
+	}
+
+	type interval struct{ start, end int64 } // inclusive
+	var covered []interval
+
+	collect := func(conn *connection) {
+		if conn == nil || conn.Chunk == nil {
+			return
+		}
+		// The actually-written range for this connection is
+		// [Begin, Begin+Downloaded-1] — NOT [Begin, End], since End may
+		// have been shrunk by a steal after some bytes were already
+		// written, or the connection may have failed partway through.
+		if conn.Chunk.Downloaded <= 0 {
+			return
+		}
+		start := conn.Chunk.Begin
+		end := conn.Chunk.Begin + conn.Chunk.Downloaded - 1
+		covered = append(covered, interval{start, end})
+	}
+
+	if f.resolveConn != nil {
+		collect(f.resolveConn)
+	}
+	for _, conn := range f.connections {
+		collect(conn)
+	}
+
+	if len(covered) == 0 {
+		return false, []string{fmt.Sprintf("0-%d", f.meta.Res.Size-1)}
+	}
+
+	sort.Slice(covered, func(i, j int) bool { return covered[i].start < covered[j].start })
+
+	var gaps []string
+	expected := int64(0)
+	for _, iv := range covered {
+		if iv.start > expected {
+			gaps = append(gaps, fmt.Sprintf("%d-%d", expected, iv.start-1))
+		}
+		if iv.end+1 > expected {
+			expected = iv.end + 1
+		}
+	}
+	if expected < f.meta.Res.Size {
+		gaps = append(gaps, fmt.Sprintf("%d-%d", expected, f.meta.Res.Size-1))
+	}
+
+	return len(gaps) == 0, gaps
+}
+
 func (f *Fetcher) onDownloadComplete() {
 	f.connMu.Lock()
 
@@ -1524,6 +1590,17 @@ func (f *Fetcher) onDownloadComplete() {
 	// If total downloaded matches file size, consider it a success regardless of connection failures
 	downloadComplete := f.meta.Res.Size > 0 && totalDownloaded >= f.meta.Res.Size
 
+	// AUTHORITATIVE CHECK: verify every byte offset was actually covered by
+	// some connection's written range. totalDownloaded >= Size is only a
+	// fast pre-check and can be satisfied even with a genuine gap, if an
+	// overlapping/duplicate write elsewhere inflates the sum. This directly
+	// examines each connection's [Begin, Begin+Downloaded) range instead of
+	// trusting the sum.
+	coverageOK, missingRanges := f.verifyFullCoverage()
+	if downloadComplete && !coverageOK {
+		downloadComplete = false
+	}
+
 	// Check for any errors, but ignore 403 (server connection limit) errors if download completed
 	var finalErr error
 	if !downloadComplete && !allChunksComplete {
@@ -1543,6 +1620,9 @@ func (f *Fetcher) onDownloadComplete() {
 				break
 			}
 		}
+	}
+	if finalErr == nil && !coverageOK {
+		finalErr = fmt.Errorf("incomplete download: missing byte ranges %v", missingRanges)
 	}
 	f.connMu.Unlock()
 
