@@ -1502,6 +1502,18 @@ func (f *Fetcher) verifyFullCoverage() (ok bool, missingRanges []string) {
 	type interval struct{ start, end int64 } // inclusive
 	var covered []interval
 
+	// Bytes downloaded during the resolve phase (async prefetch) are written
+	// to a temp file and copied into the target file at [0, prefetched-1]
+	// by stopPrefetchAndCopyData — entirely separately from any connection's
+	// Chunk tracking. The first real connection's Chunk.Begin starts AT
+	// `prefetched`, not 0, specifically to account for this (see where
+	// newChunk(prefetched, totalSize-1) is constructed). Without this, the
+	// prefetched region always looks like a false gap here even on a
+	// perfectly complete download.
+	if prefetched := f.resolveDataPos.Load(); prefetched > 0 {
+		covered = append(covered, interval{0, prefetched - 1})
+	}
+
 	collect := func(conn *connection) {
 		if conn == nil || conn.Chunk == nil {
 			return
