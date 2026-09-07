@@ -98,5 +98,54 @@ import UIKit
         result(FlutterMethodNotImplemented)
       }
     }
+    let continuedProcessingChannel =
+    FlutterMethodChannel(
+        name: "gopeed/continued_processing",
+        binaryMessenger: messenger
+    )
+
+    continuedProcessingChannel
+        .setMethodCallHandler { call, result in
+
+            switch call.method {
+
+            case "isSupported":
+
+                if #available(iOS 26.0, *) {
+                    result(true)
+                } else {
+                    result(false)
+                }
+
+            case "setEnabled":
+
+                let arguments =
+                    call.arguments
+                        as? [String: Any]
+
+                let enabled =
+                    arguments?["enabled"]
+                        as? Bool
+                    ?? false
+
+                if #available(iOS 26.0, *) {
+
+                    result(
+                        GopeedContinuedProcessingManager
+                            .shared
+                            .setEnabled(enabled)
+                    )
+
+                } else {
+
+                    result(!enabled)
+                }
+
+            default:
+                result(
+                    FlutterMethodNotImplemented
+                )
+            }
+       }
   }
 }
