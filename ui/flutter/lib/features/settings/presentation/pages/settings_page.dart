@@ -1252,6 +1252,43 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _mutateConfig((config) => config.extra.backgroundLocationKeepAlive = enabled);
     await LocationKeepAliveCoordinator.instance.reconcile(enabled: enabled);
   }
+  Future<void>
+  _setBackgroundContinuedProcessing(
+    bool enabled,
+  ) async {
+    if (enabled &&
+        !await ContinuedProcessing.isSupported()) {
+      if (mounted) {
+        _toast(
+          context.l10n
+              .backgroundContinuedProcessingUnsupported,
+        );
+      }
+      return;
+    }
+
+    final applied =
+        await ContinuedProcessing.setEnabled(
+      enabled,
+    );
+
+    if (enabled && !applied) {
+      if (mounted) {
+        _toast(
+          context.l10n
+              .backgroundContinuedProcessingUnsupported,
+        );
+      }
+      return;
+    }
+
+    _mutateConfig(
+      (config) =>
+          config.extra
+                  .backgroundContinuedProcessing =
+              enabled,
+    );
+  }
 
   List<String> _lines(String text) {
     return text.split('\n').map((line) => line.trim()).where((line) => line.isNotEmpty).toList();
