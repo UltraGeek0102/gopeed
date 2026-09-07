@@ -1,0 +1,172 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+
+env:
+  GO_VERSION: "1.25.4"
+  FLUTTER_VERSION: "3.41.6"
+  GA4_MEASUREMENT_ID: ${{ secrets.GA4_MEASUREMENT_ID }}
+  GA4_API_SECRET: ${{ secrets.GA4_API_SECRET }}
+
+permissions:
+  contents: write
+
+jobs:
+  get-release:
+    name: Get latest release
+    runs-on: ubuntu-latest
+
+    outputs:
+      version: ${{ steps.get-release.outputs.version }}
+      upload_url: ${{ steps.get-release.outputs.upload_url }}
+
+    steps:
+      - name: Get latest release
+        id: get-release
+        uses: monkeyWie/get-latest-release@v2.1
+        with:
+          myToken: ${{ github.token }}
+
+  build-ios:
+    name: Build iOS IPA
+    runs-on: macos-26
+    needs: [get-release]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Configure Live Activity extension
+        run: |
+          set -euo pipefail
+
+          test -f ui/flutter/ios/setup_live_activity.rb
+
+          # xcodeproj is normally already present on macOS runners via
+          # the CocoaPods Ruby environment. Install it only if needed.
+          if ! ruby -e "require 'xcodeproj'" 2>/dev/null; then
+            sudo gem install xcodeproj --no-document
+          fi
+
+          ruby ui/flutter/ios/setup_live_activity.rb
+
+          echo
+          echo "=== Temporary project.pbxproj changes ==="
+          git diff -- ui/flutter/ios/Runner.xcodeproj/project.pbxproj
+
+          echo
+          echo "=== Xcode targets after configuration ==="
+          xcodebuild \
+            -project ui/flutter/ios/Runner.xcodeproj \
+            -list
+
+      - name: Build Libgopeed for iOS
+        env:
+          VERSION: ${{ needs.get-release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go get golang.org/x/mobile/bind
+          gomobile init
+
+          rm -rf ui/flutter/ios/Frameworks/Libgopeed.xcframework
+
+          gomobile bind \
+            -tags nosqlite \
+            -ldflags="-w -s -X github.com/GopeedLab/gopeed/pkg/base.Version=$VERSION" \
+            -o ui/flutter/ios/Frameworks/Libgopeed.xcframework \
+            -target=ios \
+            github.com/GopeedLab/gopeed/bind/mobile
+
+      - name: Build unsigned iOS app
+        run: |
+          set -euo pipefail
+
+          cd ui/flutter
+
+          flutter build ios \
+            --no-codesign \
+            --dart-define="UPDATE_CHANNEL=iosIpa" \
+            --dart-define="GA4_MEASUREMENT_ID=${{ env.GA4_MEASUREMENT_ID }}" \
+            --dart-define="GA4_API_SECRET=${{ env.GA4_API_SECRET }}"
+
+      - name: Verify Live Activity extension
+        run: |
+          set -euo pipefail
+
+          APP="ui/flutter/build/ios/iphoneos/Runner.app"
+          PLUGINS="$APP/PlugIns"
+          LIVE_ACTIVITY="$PLUGINS/GopeedLiveActivityExtension.appex"
+
+          echo "=== Embedded extensions ==="
+          find "$PLUGINS" \
+            -maxdepth 1 \
+            -name "*.appex" \
+            -print
+
+          test -d "$LIVE_ACTIVITY"
+          test -f "$LIVE_ACTIVITY/Info.plist"
+
+          echo
+          echo "=== Runner Live Activity settings ==="
+          /usr/libexec/PlistBuddy \
+            -c "Print :NSSupportsLiveActivities" \
+            "$APP/Info.plist"
+
+          echo
+          echo "=== Live Activity extension Info.plist ==="
+          plutil -p "$LIVE_ACTIVITY/Info.plist"
+
+          echo
+          echo "Live Activity extension is embedded successfully."
+
+      - name: Package IPA
+        env:
+          VERSION: ${{ needs.get-release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          cd ui/flutter
+
+          rm -rf Payload dist Payload.zip
+          mkdir -p Payload dist
+
+          cp -R build/ios/iphoneos/Runner.app Payload/
+
+          zip -r -y -q Payload.zip Payload/Runner.app
+          mv Payload.zip "dist/Gopeed-v${VERSION}-ios.ipa"
+
+          echo
+          echo "=== IPA created ==="
+          ls -lh "dist/Gopeed-v${VERSION}-ios.ipa"
+
+          echo
+          echo "=== Live Activity extension inside IPA ==="
+          unzip -l "dist/Gopeed-v${VERSION}-ios.ipa" \
+            | grep "GopeedLiveActivityExtension.appex"
+
+      - name: Upload IPA as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gopeed-iOS-IPA
+          path: ui/flutter/dist/*.ipa
+          if-no-files-found: error
+
+      - name: Upload IPA to latest release
+        uses: shogo82148/actions-upload-release-asset@v1
+        with:
+          upload_url: ${{ needs.get-release.outputs.upload_url }}
+          asset_path: ui/flutter/dist/*
+          overwrite: true
