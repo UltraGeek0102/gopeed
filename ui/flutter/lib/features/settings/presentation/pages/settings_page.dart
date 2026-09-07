@@ -14,6 +14,7 @@ import '../../../../app/application/app_appearance_controller.dart';
 import '../../../../app/application/app_platform_controller.dart';
 import '../../../../app/application/app_runtime_controller.dart';
 import '../../../../app/application/location_keep_alive.dart';
+import '../../../../app/application/continued_processing.dart';
 import '../../../../core/common/start_config.dart';
 import '../../../../core/network/gopeed/gopeed_transport.dart';
 import '../../../../core/utils/breakpoints.dart';
@@ -376,6 +377,19 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                       child: shad.Switch(
                         value: config.extra.backgroundLocationKeepAlive,
                         onChanged: (value) => unawaited(_setBackgroundLocationKeepAlive(value)),
+                      ),
+                    ),
+                  if (Util.isIOS())
+                    SettingsItem(
+                      title: context.l10n.backgroundContinuedProcessing,
+                      subtitle:
+                          context.l10n.backgroundContinuedProcessingDescription,
+                      child: shad.Switch(
+                        value:
+                            config.extra.backgroundContinuedProcessing,
+                        onChanged: (value) => unawaited(
+                          _setBackgroundContinuedProcessing(value),
+                        ),
                       ),
                     ),
                 ],
