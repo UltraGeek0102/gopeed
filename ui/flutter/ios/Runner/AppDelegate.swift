@@ -59,8 +59,19 @@ import UIKit
         result(LibgopeedInvoke(method, path, query, body))
       case "subscribeTaskEvents":
         let arguments = call.arguments as? [String: Any]
-        let mask = (arguments?["mask"] as? NSNumber)?.int64Value ?? 0
-        GopeedSubscribeTaskEventsWithForwarder(mask, mask == 0 ? nil : taskEventForwarder)
+        let flutterMask =
+            (arguments?["mask"] as? NSNumber)?.int64Value ?? 0
+    
+        let liveActivityMask =
+            LibgopeedLiveActivityTaskEventMask()
+    
+        let combinedMask =
+            flutterMask | liveActivityMask
+    
+        GopeedSubscribeTaskEventsWithForwarder(
+            combinedMask,
+            taskEventForwarder
+        )
         result(nil)
       default:
         result(FlutterMethodNotImplemented)
