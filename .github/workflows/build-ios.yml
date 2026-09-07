@@ -98,7 +98,7 @@ jobs:
 
           cd ui/flutter
 
-          flutter build ios \
+          flutter build ios -v \
             --no-codesign \
             --build-name="${{ env.IOS_MARKETING_VERSION }}" \
             --build-number="${{ env.IOS_BUILD_NUMBER }}" \
