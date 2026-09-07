@@ -23,6 +23,7 @@ import '../../util/util.dart';
 import '../rpc/webview_rpc_service.dart';
 import 'android_foreground_service.dart';
 import 'location_keep_alive.dart';
+import 'continued_processing.dart';
 
 const unixSocketPath = 'gopeed.sock';
 
