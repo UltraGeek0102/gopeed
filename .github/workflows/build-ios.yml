@@ -6,6 +6,8 @@ on:
 env:
   GO_VERSION: "1.25.4"
   FLUTTER_VERSION: "3.41.6"
+  IOS_MARKETING_VERSION: "2.0.0"
+  IOS_BUILD_NUMBER: "1"
   GA4_MEASUREMENT_ID: ${{ secrets.GA4_MEASUREMENT_ID }}
   GA4_API_SECRET: ${{ secrets.GA4_API_SECRET }}
 
@@ -98,17 +100,24 @@ jobs:
 
           flutter build ios \
             --no-codesign \
+            --build-name="${{ env.IOS_MARKETING_VERSION }}" \
+            --build-number="${{ env.IOS_BUILD_NUMBER }}" \
             --dart-define="UPDATE_CHANNEL=iosIpa" \
             --dart-define="GA4_MEASUREMENT_ID=${{ env.GA4_MEASUREMENT_ID }}" \
             --dart-define="GA4_API_SECRET=${{ env.GA4_API_SECRET }}"
 
-      - name: Verify Live Activity extension
+      - name: Verify embedded extensions and versions
         run: |
           set -euo pipefail
 
           APP="ui/flutter/build/ios/iphoneos/Runner.app"
           PLUGINS="$APP/PlugIns"
+          SHARE="$PLUGINS/ShareExtension.appex"
           LIVE_ACTIVITY="$PLUGINS/GopeedLiveActivityExtension.appex"
+
+          test -d "$APP"
+          test -d "$SHARE"
+          test -d "$LIVE_ACTIVITY"
 
           echo "=== Embedded extensions ==="
           find "$PLUGINS" \
@@ -116,20 +125,38 @@ jobs:
             -name "*.appex" \
             -print
 
-          test -d "$LIVE_ACTIVITY"
-          test -f "$LIVE_ACTIVITY/Info.plist"
+          echo
+          echo "=== Bundle versions ==="
+
+          for BUNDLE in "$APP" "$SHARE" "$LIVE_ACTIVITY"; do
+            PLIST="$BUNDLE/Info.plist"
+
+            IDENTIFIER=$(/usr/libexec/PlistBuddy \
+              -c "Print :CFBundleIdentifier" "$PLIST")
+
+            SHORT_VERSION=$(/usr/libexec/PlistBuddy \
+              -c "Print :CFBundleShortVersionString" "$PLIST")
+
+            BUILD_VERSION=$(/usr/libexec/PlistBuddy \
+              -c "Print :CFBundleVersion" "$PLIST")
+
+            echo "$BUNDLE"
+            echo "  id:      $IDENTIFIER"
+            echo "  version: $SHORT_VERSION"
+            echo "  build:   $BUILD_VERSION"
+
+            test "$SHORT_VERSION" = "${{ env.IOS_MARKETING_VERSION }}"
+            test "$BUILD_VERSION" = "${{ env.IOS_BUILD_NUMBER }}"
+          done
 
           echo
-          echo "=== Runner Live Activity settings ==="
+          echo "=== Runner Live Activity setting ==="
           /usr/libexec/PlistBuddy \
             -c "Print :NSSupportsLiveActivities" \
             "$APP/Info.plist"
 
           echo
-          echo "=== Live Activity extension Info.plist ==="
-          plutil -p "$LIVE_ACTIVITY/Info.plist"
-
-          echo
+          echo "All app/extension version numbers match."
           echo "Live Activity extension is embedded successfully."
 
       - name: Package IPA
