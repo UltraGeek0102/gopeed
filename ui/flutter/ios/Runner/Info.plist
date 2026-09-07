@@ -112,6 +112,7 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>
+        <string>processing</string>
 	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
