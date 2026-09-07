@@ -356,9 +356,7 @@ final class GopeedLiveActivityManager: NSObject {
         let content =
             ActivityContent(
                 state: state,
-                staleDate:
-                    Date()
-                        .addingTimeInterval(30)
+                staleDate: nil
             )
 
         // Activity already exists → update it.
