@@ -8,6 +8,7 @@ import (
 	"github.com/GopeedLab/gopeed/internal/webview/rpcprovider"
 	"github.com/GopeedLab/gopeed/pkg/rest"
 	"github.com/GopeedLab/gopeed/pkg/rest/model"
+	"github.com/GopeedLab/gopeed/pkg/api"
 )
 
 func Start(cfg string) (int, error) {
@@ -71,4 +72,15 @@ func applyWebViewProvider(config *model.StartConfig) {
 		return
 	}
 	config.WebViewProvider = rpcprovider.New(*config.WebViewRPCConfig)
+}
+
+func LiveActivityTaskEventMask() int64 {
+    return int64(
+        goapi.TaskEventDone |
+            goapi.TaskEventError |
+            goapi.TaskEventStart |
+            goapi.TaskEventProgress |
+            goapi.TaskEventPause |
+            goapi.TaskEventDelete,
+    )
 }
