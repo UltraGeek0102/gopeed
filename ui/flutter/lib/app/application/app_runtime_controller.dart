@@ -197,7 +197,7 @@ class AppRuntimeController extends AsyncNotifier<AppRuntimeState> {
 
         ),
 
-      )
+      );
       LocationKeepAliveCoordinator.instance.start(
         () =>
             state.value?.downloaderConfig.extra.backgroundLocationKeepAlive ?? config.extra.backgroundLocationKeepAlive,
