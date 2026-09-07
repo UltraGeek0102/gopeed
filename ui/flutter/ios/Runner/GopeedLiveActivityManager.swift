@@ -245,6 +245,7 @@ final class GopeedLiveActivityManager: NSObject {
         // If we don't have enough information for an ETA,
         // use the real static progress bar.
         guard
+            runtime.status == "running",
             total > 0,
             runtime.speed > 0,
             downloaded < total,
