@@ -47,6 +47,7 @@ end
 required_files = [
   File.join(__dir__, 'Runner', 'GopeedDownloadAttributes.swift'),
   File.join(__dir__, 'Runner', 'GopeedLiveActivityManager.swift'),
+  File.join(__dir__, 'Runner', 'GopeedContinuedProcessingManager.swift'),
   File.join(__dir__, 'GopeedLiveActivity', 'GopeedLiveActivityWidget.swift'),
   File.join(__dir__, 'GopeedLiveActivity', 'Info.plist')
 ]
@@ -107,6 +108,11 @@ manager_ref = find_or_add_file(
   'GopeedLiveActivityManager.swift'
 )
 
+continued_processing_ref = find_or_add_file(
+  runner_group,
+  'GopeedContinuedProcessingManager.swift'
+)
+
 runner_sources = runner.source_build_phase.files_references.compact
 
 unless runner_sources.include?(attributes_ref)
@@ -117,6 +123,14 @@ end
 unless runner_sources.include?(manager_ref)
   runner.source_build_phase.add_file_reference(manager_ref, true)
   puts 'Added GopeedLiveActivityManager.swift to Runner'
+end
+
+unless runner_sources.include?(continued_processing_ref)
+  runner.source_build_phase.add_file_reference(
+    continued_processing_ref,
+    true
+  )
+  puts 'Added GopeedContinuedProcessingManager.swift to Runner'
 end
 
 # ============================================================
@@ -420,6 +434,7 @@ puts 'Expected important entries:'
 puts '  Runner sources:'
 puts '    GopeedDownloadAttributes.swift'
 puts '    GopeedLiveActivityManager.swift'
+puts '    GopeedContinuedProcessingManager.swift'
 puts
 puts '  Extension sources:'
 puts '    GopeedLiveActivityWidget.swift'
