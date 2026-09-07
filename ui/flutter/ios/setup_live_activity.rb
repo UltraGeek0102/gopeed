@@ -3,6 +3,19 @@ require 'xcodeproj'
 project_path = File.join(__dir__, 'Runner.xcodeproj')
 project = Xcodeproj::Project.open(project_path)
 
+ios_marketing_version = ENV.fetch('IOS_MARKETING_VERSION', '2.0.0')
+ios_build_number = ENV.fetch('IOS_BUILD_NUMBER', '1')
+
+unless ios_marketing_version.match?(/\A\d+\.\d+\.\d+\z/)
+  raise "ERROR: IOS_MARKETING_VERSION must be exactly x.y.z, got #{ios_marketing_version.inspect}"
+end
+
+unless ios_build_number.match?(/\A\d+(?:\.\d+){0,2}\z/)
+  raise "ERROR: IOS_BUILD_NUMBER must contain one to three numeric components, got #{ios_build_number.inspect}"
+end
+
+puts "Using iOS marketing version #{ios_marketing_version} (build #{ios_build_number})"
+
 puts 'Configuring Gopeed Live Activity extension...'
 
 # ============================================================
@@ -190,6 +203,32 @@ unless extension_sources.include?(attributes_ref)
 end
 
 # ============================================================
+# Keep ShareExtension version/build synchronized with Runner.
+#
+# The upstream project currently uses MARKETING_VERSION = 1.0
+# for ShareExtension. An embedded extension should use the same
+# version/build values as its containing app.
+# ============================================================
+
+share_extension = project.targets.find { |target| target.name == 'ShareExtension' }
+
+raise 'ERROR: ShareExtension target not found.' unless share_extension
+
+share_extension.build_configurations.each do |config|
+  config.build_settings['MARKETING_VERSION'] =
+    ios_marketing_version
+
+  config.build_settings['CURRENT_PROJECT_VERSION'] =
+    ios_build_number
+
+  puts(
+    "Configured #{config.name} ShareExtension version: " \
+    "#{ios_marketing_version} (#{ios_build_number})"
+  )
+end
+
+
+# ============================================================
 # Extension build settings
 #
 # Match Gopeed's existing ShareExtension setup:
@@ -260,10 +299,10 @@ extension_target.build_configurations.each do |config|
 
   # Mirror the existing ShareExtension version settings.
   config.build_settings['CURRENT_PROJECT_VERSION'] =
-    '$(FLUTTER_BUILD_NUMBER)'
+    ios_build_number
 
   config.build_settings['MARKETING_VERSION'] =
-    '1.0'
+    ios_marketing_version
 
   config.build_settings['LD_RUNPATH_SEARCH_PATHS'] = [
     '$(inherited)',
@@ -272,8 +311,8 @@ extension_target.build_configurations.each do |config|
   ]
 
   puts(
-    "Configured #{config.name} Live Activity bundle ID: " \
-    "#{extension_bundle_id}"
+    "Configured #{config.name} Live Activity: " \
+    "#{extension_bundle_id}, version #{ios_marketing_version} (#{ios_build_number})"
   )
 end
 
