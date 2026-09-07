@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 
 	"github.com/GopeedLab/gopeed/internal/webview/rpcprovider"
+	goapi "github.com/GopeedLab/gopeed/pkg/api"
 	"github.com/GopeedLab/gopeed/pkg/rest"
 	"github.com/GopeedLab/gopeed/pkg/rest/model"
-	"github.com/GopeedLab/gopeed/pkg/api"
 )
 
 func Start(cfg string) (int, error) {
