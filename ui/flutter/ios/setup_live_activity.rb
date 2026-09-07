@@ -191,11 +191,38 @@ end
 
 # ============================================================
 # Extension build settings
+#
+# Match Gopeed's existing ShareExtension setup:
+# - Generate standard Info.plist bundle metadata.
+# - Keep our custom Info.plist for the WidgetKit NSExtension keys.
+# - Derive the extension bundle identifier from Runner so Xcode's
+#   embedded-binary prefix validation can never drift.
 # ============================================================
 
+runner_configs = {}
+runner.build_configurations.each do |config|
+  runner_configs[config.name] = config
+end
+
 extension_target.build_configurations.each do |config|
+  runner_config = runner_configs[config.name]
+
+  unless runner_config
+    raise "ERROR: Runner has no #{config.name} build configuration."
+  end
+
+  parent_bundle_id =
+    runner_config.build_settings['PRODUCT_BUNDLE_IDENTIFIER']
+
+  if parent_bundle_id.nil? || parent_bundle_id.to_s.strip.empty?
+    raise "ERROR: Runner PRODUCT_BUNDLE_IDENTIFIER is missing for #{config.name}."
+  end
+
+  extension_bundle_id =
+    "#{parent_bundle_id}.GopeedLiveActivityExtension"
+
   config.build_settings['PRODUCT_BUNDLE_IDENTIFIER'] =
-    'com.gopeed.gopeed.GopeedLiveActivityExtension'
+    extension_bundle_id
 
   config.build_settings['PRODUCT_NAME'] =
     '$(TARGET_NAME)'
@@ -203,8 +230,15 @@ extension_target.build_configurations.each do |config|
   config.build_settings['INFOPLIST_FILE'] =
     'GopeedLiveActivity/Info.plist'
 
+  # IMPORTANT:
+  # Gopeed's existing ShareExtension also uses YES here.
+  # This generates CFBundleIdentifier / executable / package metadata
+  # while retaining the custom NSExtension dictionary from Info.plist.
   config.build_settings['GENERATE_INFOPLIST_FILE'] =
-    'NO'
+    'YES'
+
+  config.build_settings['INFOPLIST_KEY_CFBundleDisplayName'] =
+    'Gopeed'
 
   config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] =
     '16.2'
@@ -224,12 +258,25 @@ extension_target.build_configurations.each do |config|
   config.build_settings['CODE_SIGN_STYLE'] =
     'Automatic'
 
+  # Mirror the existing ShareExtension version settings.
+  config.build_settings['CURRENT_PROJECT_VERSION'] =
+    '$(FLUTTER_BUILD_NUMBER)'
+
+  config.build_settings['MARKETING_VERSION'] =
+    '1.0'
+
   config.build_settings['LD_RUNPATH_SEARCH_PATHS'] = [
     '$(inherited)',
     '@executable_path/Frameworks',
     '@executable_path/../../Frameworks'
   ]
+
+  puts(
+    "Configured #{config.name} Live Activity bundle ID: " \
+    "#{extension_bundle_id}"
+  )
 end
+
 
 # ============================================================
 # Runner -> extension target dependency
