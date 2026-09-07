@@ -22,36 +22,59 @@
 
 - (void)onTaskEvent:(NSString * _Nullable)payload {
   NSString *arguments = payload ?: @"";
-  // Send every event to native ActivityKit handling.
-  [[GopeedLiveActivityManager shared]
-      handleTaskEventPayload:arguments];
 
-  // Flutter currently understands only task.done/task.error.
   NSData *data =
       [arguments dataUsingEncoding:NSUTF8StringEncoding];
 
   NSDictionary *json = nil;
 
   if (data) {
-      json =
-          [NSJSONSerialization JSONObjectWithData:data
-                                          options:0
-                                            error:nil];
+    json =
+        [NSJSONSerialization JSONObjectWithData:data
+                                        options:0
+                                          error:nil];
   }
 
   NSString *type = json[@"type"];
+  NSString *taskID = json[@"taskId"];
 
+  BOOL continuedProcessingHandlesTask = NO;
+
+  // iOS 26 system continued-processing Live Activity.
+  if (@available(iOS 26.0, *)) {
+    GopeedContinuedProcessingManager *manager =
+        [GopeedContinuedProcessingManager shared];
+
+    [manager handleTaskEventPayload:arguments];
+
+    if (taskID.length > 0) {
+      continuedProcessingHandlesTask =
+          [manager isHandlingTaskId:taskID];
+    }
+  }
+
+  // When BGCPT is active, let Apple's system Live Activity
+  // represent progress. Otherwise keep using our existing
+  // custom Gopeed ActivityKit implementation.
+  if (!continuedProcessingHandlesTask) {
+    [[GopeedLiveActivityManager shared]
+        handleTaskEventPayload:arguments];
+  }
+
+  // Flutter currently understands only done/error.
   BOOL flutterEvent =
       [type isEqualToString:@"task.done"] ||
       [type isEqualToString:@"task.error"];
 
   if (!flutterEvent) {
-      return;
+    return;
   }
-  
+
   FlutterMethodChannel *channel = self.channel;
+
   dispatch_async(dispatch_get_main_queue(), ^{
-    [channel invokeMethod:@"taskEvent" arguments:arguments];
+    [channel invokeMethod:@"taskEvent"
+                arguments:arguments];
   });
 }
 
