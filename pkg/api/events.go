@@ -72,7 +72,6 @@ func (s *Service) emitTaskEvent(event *download.Event) {
 	default:
 	    return
 	}
-	}
 
 	s.taskEvents.mu.RLock()
 	if s.taskEvents.mask&mask == 0 || s.taskEvents.listener == nil {
