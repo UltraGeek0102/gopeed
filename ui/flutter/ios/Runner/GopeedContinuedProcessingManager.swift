@@ -46,7 +46,7 @@ final class GopeedContinuedProcessingManager: NSObject {
         TimeInterval = 1.0
 
     private let minimumTitleUpdateInterval:
-        TimeInterval = 5.0
+        TimeInterval = 1.0
 
     private override init() {
         super.init()
