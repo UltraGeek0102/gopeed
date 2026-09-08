@@ -9,7 +9,20 @@ final class GopeedContinuedProcessingManager: NSObject {
 
     static let shared = GopeedContinuedProcessingManager()
 
-    private(set) var isEnabled = false
+    // MARK: - Worker / state synchronization
+
+    private let workerQueue = DispatchQueue(
+        label: "com.gopeed.continued-processing",
+        qos: .userInitiated
+    )
+
+    private let workerQueueKey = DispatchSpecificKey<Void>()
+
+    private let stateLock = NSLock()
+    private var enabledSnapshot = false
+    private var handledTaskIDs = Set<String>()
+
+    // MARK: - BGCPT state
 
     private var registeredIdentifiers = Set<String>()
     private var pendingTaskIDs = Set<String>()
@@ -26,45 +39,100 @@ final class GopeedContinuedProcessingManager: NSObject {
     private var lastProgressUpdate:
         [String: Date] = [:]
 
-    // Gopeed sends progress about every 350 ms.
-    // One system-progress update per second is enough.
-    private let minimumUpdateInterval:
+    private var lastTitleUpdate:
+        [String: Date] = [:]
+
+    private let minimumProgressUpdateInterval:
         TimeInterval = 1.0
+
+    private let minimumTitleUpdateInterval:
+        TimeInterval = 5.0
 
     private override init() {
         super.init()
+
+        workerQueue.setSpecific(
+            key: workerQueueKey,
+            value: ()
+        )
     }
 
 
-    // MARK: - Availability / setting
+    // MARK: - Synchronization helpers
 
-    func setEnabled(_ enabled: Bool) -> Bool {
+    private func syncOnWorker<T>(
+        _ work: () -> T
+    ) -> T {
 
-        if Thread.isMainThread {
-            return setEnabledOnMain(enabled)
+        if DispatchQueue.getSpecific(
+            key: workerQueueKey
+        ) != nil {
+            return work()
         }
 
-        return DispatchQueue.main.sync {
-            setEnabledOnMain(enabled)
-        }
+        return workerQueue.sync(
+            execute: work
+        )
     }
 
-    private func setEnabledOnMain(
+    private func currentEnabledSnapshot() -> Bool {
+        stateLock.lock()
+        let value = enabledSnapshot
+        stateLock.unlock()
+
+        return value
+    }
+
+    private func setEnabledSnapshot(
+        _ enabled: Bool
+    ) {
+        stateLock.lock()
+        enabledSnapshot = enabled
+
+        if !enabled {
+            handledTaskIDs.removeAll()
+        }
+
+        stateLock.unlock()
+    }
+
+    private func setHandledSnapshot(
+        taskID: String,
+        handled: Bool
+    ) {
+        stateLock.lock()
+
+        if handled {
+            handledTaskIDs.insert(taskID)
+        } else {
+            handledTaskIDs.remove(taskID)
+        }
+
+        stateLock.unlock()
+    }
+
+
+    // MARK: - Setting
+
+    func setEnabled(
         _ enabled: Bool
     ) -> Bool {
 
-        isEnabled = enabled
+        return syncOnWorker {
 
-        if !enabled {
-            stopAllContinuedTasks()
+            self.setEnabledSnapshot(enabled)
+
+            if !enabled {
+                self.stopAllContinuedTasks()
+            }
+
+            print(
+                "ContinuedProcessing: enabled =",
+                enabled
+            )
+
+            return true
         }
-
-        print(
-            "ContinuedProcessing: enabled =",
-            enabled
-        )
-
-        return true
     }
 
 
@@ -74,26 +142,41 @@ final class GopeedContinuedProcessingManager: NSObject {
         _ payload: String
     ) {
 
-        let work = {
-            self.handleTaskEventPayloadOnMain(
-                payload
+        guard currentEnabledSnapshot() else {
+            return
+        }
+
+        // Pre-mark task.start so the Objective-C forwarder can
+        // immediately suppress the custom ActivityKit Live Activity.
+        if
+            let data = payload.data(using: .utf8),
+            let json = try? JSONSerialization.jsonObject(
+                with: data
+            ) as? [String: Any],
+            let type = json["type"] as? String,
+            type == "task.start",
+            let taskID = json["taskId"] as? String
+        {
+            setHandledSnapshot(
+                taskID: taskID,
+                handled: true
             )
         }
 
-        if Thread.isMainThread {
-            work()
-        } else {
-            DispatchQueue.main.sync(
-                execute: work
+        // IMPORTANT: asynchronous, so Gopeed's event thread
+        // is never blocked by BGCPT bookkeeping.
+        workerQueue.async { [weak self] in
+            self?.handleTaskEventPayloadOnWorker(
+                payload
             )
         }
     }
 
-    private func handleTaskEventPayloadOnMain(
+    private func handleTaskEventPayloadOnWorker(
         _ payload: String
     ) {
 
-        guard isEnabled else {
+        guard currentEnabledSnapshot() else {
             return
         }
 
@@ -179,25 +262,13 @@ final class GopeedContinuedProcessingManager: NSObject {
         _ taskID: String
     ) -> Bool {
 
-        if Thread.isMainThread {
-            return isHandlingTaskIdOnMain(
-                taskID
-            )
-        }
+        // Do not wait for workerQueue here. The forwarder calls
+        // this for frequent progress events.
+        stateLock.lock()
+        let handled = handledTaskIDs.contains(taskID)
+        stateLock.unlock()
 
-        return DispatchQueue.main.sync {
-            isHandlingTaskIdOnMain(
-                taskID
-            )
-        }
-    }
-
-    private func isHandlingTaskIdOnMain(
-        _ taskID: String
-    ) -> Bool {
-
-        return pendingTaskIDs.contains(taskID)
-            || activeTasks[taskID] != nil
+        return handled
     }
 
 
@@ -208,20 +279,44 @@ final class GopeedContinuedProcessingManager: NSObject {
         name: String
     ) {
 
-        guard isEnabled else {
+        guard currentEnabledSnapshot() else {
+            setHandledSnapshot(
+                taskID: taskID,
+                handled: false
+            )
             return
         }
 
-        // Continued processing tasks are supposed
-        // to originate from a foreground user action.
-        guard
-            UIApplication.shared
-                .applicationState == .active
-        else {
+        // BGCPT should originate from a foreground user action.
+        // This main-thread check happens only once per task start.
+        let appIsActive: Bool
+
+        if Thread.isMainThread {
+
+            appIsActive =
+                UIApplication.shared
+                    .applicationState == .active
+
+        } else {
+
+            appIsActive =
+                DispatchQueue.main.sync {
+                    UIApplication.shared
+                        .applicationState == .active
+                }
+        }
+
+        guard appIsActive else {
+
             print(
                 "ContinuedProcessing:",
                 "ignored non-foreground start",
                 taskID
+            )
+
+            setHandledSnapshot(
+                taskID: taskID,
+                handled: false
             )
 
             return
@@ -231,6 +326,10 @@ final class GopeedContinuedProcessingManager: NSObject {
             !pendingTaskIDs.contains(taskID),
             activeTasks[taskID] == nil
         else {
+            setHandledSnapshot(
+                taskID: taskID,
+                handled: true
+            )
             return
         }
 
@@ -252,13 +351,12 @@ final class GopeedContinuedProcessingManager: NSObject {
                 BGTaskScheduler.shared.register(
                     forTaskWithIdentifier:
                         identifier,
-                    using:
-                        DispatchQueue.main
+                    using: nil
                 ) { [weak self] task in
 
                     guard
                         let self,
-                        let task =
+                        let continuedTask =
                             task as?
                             BGContinuedProcessingTask
                     else {
@@ -268,11 +366,14 @@ final class GopeedContinuedProcessingManager: NSObject {
                         return
                     }
 
-                    self.activateTask(
-                        task,
-                        taskID: taskID,
-                        name: name
-                    )
+                    self.workerQueue.async {
+
+                        self.activateTask(
+                            continuedTask,
+                            taskID: taskID,
+                            name: name
+                        )
+                    }
                 }
 
             guard registered else {
@@ -291,6 +392,11 @@ final class GopeedContinuedProcessingManager: NSObject {
                     forKey: taskID
                 )
 
+                setHandledSnapshot(
+                    taskID: taskID,
+                    handled: false
+                )
+
                 return
             }
 
@@ -307,12 +413,14 @@ final class GopeedContinuedProcessingManager: NSObject {
                     "Preparing download…"
             )
 
-        // A Gopeed download has already started.
-        // A delayed/queued BGCPT would be undesirable,
-        // so fall back immediately if iOS cannot run it.
         request.strategy = .fail
 
         pendingTaskIDs.insert(taskID)
+
+        setHandledSnapshot(
+            taskID: taskID,
+            handled: true
+        )
 
         do {
 
@@ -336,6 +444,15 @@ final class GopeedContinuedProcessingManager: NSObject {
                 forKey: taskID
             )
 
+            taskNames.removeValue(
+                forKey: taskID
+            )
+
+            setHandledSnapshot(
+                taskID: taskID,
+                handled: false
+            )
+
             print(
                 "ContinuedProcessing:",
                 "submission failed:",
@@ -353,7 +470,12 @@ final class GopeedContinuedProcessingManager: NSObject {
         name: String
     ) {
 
-        guard isEnabled else {
+        guard currentEnabledSnapshot() else {
+
+            setHandledSnapshot(
+                taskID: taskID,
+                handled: false
+            )
 
             task.setTaskCompleted(
                 success: false
@@ -365,8 +487,12 @@ final class GopeedContinuedProcessingManager: NSObject {
         pendingTaskIDs.remove(taskID)
 
         activeTasks[taskID] = task
-
         taskNames[taskID] = name
+
+        setHandledSnapshot(
+            taskID: taskID,
+            handled: true
+        )
 
         task.progress.totalUnitCount = 100
         task.progress.completedUnitCount = 0
@@ -374,14 +500,14 @@ final class GopeedContinuedProcessingManager: NSObject {
         task.expirationHandler = {
             [weak self, weak task] in
 
-            DispatchQueue.main.async {
+            guard
+                let self,
+                let task
+            else {
+                return
+            }
 
-                guard
-                    let self,
-                    let task
-                else {
-                    return
-                }
+            self.workerQueue.async {
 
                 self.handleExpiration(
                     task,
@@ -480,7 +606,7 @@ final class GopeedContinuedProcessingManager: NSObject {
            let previous =
                 lastProgressUpdate[taskID],
            now.timeIntervalSince(previous)
-                < minimumUpdateInterval {
+                < minimumProgressUpdateInterval {
 
             return
         }
@@ -496,12 +622,30 @@ final class GopeedContinuedProcessingManager: NSObject {
 
         lastProgressUpdate[taskID] = now
 
+        let shouldUpdateTitle: Bool
+
+        if force {
+
+            shouldUpdateTitle = true
+
+        } else if let previous =
+                    lastTitleUpdate[taskID] {
+
+            shouldUpdateTitle =
+                now.timeIntervalSince(previous)
+                >= minimumTitleUpdateInterval
+
+        } else {
+
+            shouldUpdateTitle = true
+        }
+
         let downloaded =
             max(runtime.downloaded, 0)
 
         let name =
             taskNames[taskID]
-            ?? task.title
+            ?? "Download"
 
         if runtime.total > 0 {
 
@@ -514,55 +658,68 @@ final class GopeedContinuedProcessingManager: NSObject {
                     total
                 )
 
+            // Real task progress remains frequent.
             task.progress.totalUnitCount =
                 total
 
             task.progress.completedUnitCount =
                 completed
 
-            let percent =
-                Int(
-                    (
-                        Double(completed)
-                        / Double(total)
-                        * 100.0
-                    ).rounded()
+            // Visible title/subtitle only every ~5 seconds.
+            if shouldUpdateTitle {
+
+                let percent =
+                    Int(
+                        (
+                            Double(completed)
+                            / Double(total)
+                            * 100.0
+                        ).rounded()
+                    )
+
+                var subtitle =
+                    "\(percent)% • " +
+                    "\(formatBytes(completed)) / " +
+                    "\(formatBytes(total))"
+
+                if runtime.speed > 0 {
+                    subtitle +=
+                        " • \(formatBytes(runtime.speed))/s"
+                }
+
+                task.updateTitle(
+                    name,
+                    subtitle: subtitle
                 )
 
-            var subtitle =
-                "\(percent)% • " +
-                "\(formatBytes(completed)) / " +
-                "\(formatBytes(total))"
-
-            if runtime.speed > 0 {
-                subtitle +=
-                    " • \(formatBytes(runtime.speed))/s"
+                lastTitleUpdate[taskID] =
+                    now
             }
-
-            task.updateTitle(
-                name,
-                subtitle: subtitle
-            )
 
         } else {
 
-            // Some protocols don't know their
-            // total size immediately.
+            // Unknown total size.
             task.progress.totalUnitCount = 100
             task.progress.completedUnitCount = 0
 
-            var subtitle =
-                formatBytes(downloaded)
+            if shouldUpdateTitle {
 
-            if runtime.speed > 0 {
-                subtitle +=
-                    " • \(formatBytes(runtime.speed))/s"
+                var subtitle =
+                    formatBytes(downloaded)
+
+                if runtime.speed > 0 {
+                    subtitle +=
+                        " • \(formatBytes(runtime.speed))/s"
+                }
+
+                task.updateTitle(
+                    name,
+                    subtitle: subtitle
+                )
+
+                lastTitleUpdate[taskID] =
+                    now
             }
-
-            task.updateTitle(
-                name,
-                subtitle: subtitle
-            )
         }
     }
 
@@ -611,7 +768,7 @@ final class GopeedContinuedProcessingManager: NSObject {
 
             task.updateTitle(
                 taskNames[taskID]
-                    ?? task.title,
+                    ?? "Download",
                 subtitle:
                     finalSubtitle
             )
@@ -633,6 +790,15 @@ final class GopeedContinuedProcessingManager: NSObject {
             forKey: taskID
         )
 
+        lastTitleUpdate.removeValue(
+            forKey: taskID
+        )
+
+        setHandledSnapshot(
+            taskID: taskID,
+            handled: false
+        )
+
         print(
             "ContinuedProcessing:",
             "finished:",
@@ -650,8 +816,6 @@ final class GopeedContinuedProcessingManager: NSObject {
         taskID: String
     ) {
 
-        // Remove first so the resulting task.pause
-        // event cannot complete this BGTask twice.
         activeTasks.removeValue(
             forKey: taskID
         )
@@ -662,15 +826,21 @@ final class GopeedContinuedProcessingManager: NSObject {
             forKey: taskID
         )
 
+        lastTitleUpdate.removeValue(
+            forKey: taskID
+        )
+
+        setHandledSnapshot(
+            taskID: taskID,
+            handled: false
+        )
+
         print(
             "ContinuedProcessing:",
             "expired/cancelled:",
             taskID
         )
 
-        // The system Live Activity allows the user
-        // to cancel the task. Respect that by
-        // pausing the corresponding Gopeed download.
         _ = LibgopeedInvoke(
             "PUT",
             "/api/v1/tasks/\(taskID)/pause",
@@ -713,6 +883,11 @@ final class GopeedContinuedProcessingManager: NSObject {
                     success: true
                 )
             }
+
+            setHandledSnapshot(
+                taskID: taskID,
+                handled: false
+            )
         }
 
         activeTasks.removeAll()
@@ -720,6 +895,7 @@ final class GopeedContinuedProcessingManager: NSObject {
         taskIdentifiers.removeAll()
         taskNames.removeAll()
         lastProgressUpdate.removeAll()
+        lastTitleUpdate.removeAll()
     }
 
 
