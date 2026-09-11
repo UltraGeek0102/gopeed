@@ -128,6 +128,36 @@ final class GopeedLiveActivityManager: NSObject {
     }
 
 
+    // MARK: - Async Gopeed invocation
+
+    private func invokeGopeed(
+        method: String,
+        path: String,
+        query: String = "",
+        body: String = ""
+    ) async -> String? {
+
+        await withCheckedContinuation {
+            continuation in
+
+            GopeedInvokeAsyncNative(
+                method,
+                path,
+                query,
+                body
+            ) { success, payload in
+
+                continuation.resume(
+                    returning:
+                        success
+                        ? payload
+                        : nil
+                )
+            }
+        }
+    }
+
+
     // MARK: - Gopeed runtime status
 
     private struct RuntimeStatus {
@@ -139,14 +169,21 @@ final class GopeedLiveActivityManager: NSObject {
 
     private func getRuntimeStatus(
         taskID: String
-    ) -> RuntimeStatus? {
+    ) async -> RuntimeStatus? {
 
-        let response = LibgopeedInvoke(
-            "GET",
-            "/api/v1/tasks/\(taskID)/status",
-            "",
-            ""
-        )
+        guard
+            let response =
+                await invokeGopeed(
+                    method: "GET",
+                    path:
+                        "/api/v1/tasks/\(taskID)/status"
+                )
+        else {
+            print(
+                "LiveActivity: status request failed for \(taskID)"
+            )
+            return nil
+        }
 
         guard
             let data = response.data(using: .utf8),
@@ -199,7 +236,6 @@ final class GopeedLiveActivityManager: NSObject {
                     .int64Value ?? 0
         )
     }
-
 
     // MARK: - Build Live Activity state
 
@@ -344,7 +380,7 @@ final class GopeedLiveActivityManager: NSObject {
 
         guard
             let runtime =
-                getRuntimeStatus(
+                await getRuntimeStatus(
                     taskID: taskID
                 )
         else {
