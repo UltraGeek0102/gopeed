@@ -7,7 +7,7 @@ env:
   GO_VERSION: "1.25.4"
   FLUTTER_VERSION: "3.41.6"
   IOS_MARKETING_VERSION: "2.0.0"
-  IOS_BUILD_NUMBER: "1"
+  IOS_BUILD_NUMBER: "2"
   GA4_MEASUREMENT_ID: ${{ secrets.GA4_MEASUREMENT_ID }}
   GA4_API_SECRET: ${{ secrets.GA4_API_SECRET }}
 
@@ -15,29 +15,35 @@ permissions:
   contents: write
 
 jobs:
-  get-release:
-    name: Get latest release
-    runs-on: ubuntu-latest
-
-    outputs:
-      version: ${{ steps.get-release.outputs.version }}
-      upload_url: ${{ steps.get-release.outputs.upload_url }}
-
-    steps:
-      - name: Get latest release
-        id: get-release
-        uses: monkeyWie/get-latest-release@v2.1
-        with:
-          myToken: ${{ github.token }}
-
   build-ios:
     name: Build iOS IPA
     runs-on: macos-26
-    needs: [get-release]
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve source version
+        id: version
+        run: |
+          set -euo pipefail
+
+          RAW_VERSION=$(awk '/^version:/ { print $2; exit }' ui/flutter/pubspec.yaml)
+          SOURCE_VERSION="${RAW_VERSION%%+*}"
+          SOURCE_BUILD="${RAW_VERSION##*+}"
+
+          test -n "$SOURCE_VERSION"
+          test -n "$SOURCE_BUILD"
+
+          echo "version=$SOURCE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$SOURCE_BUILD" >> "$GITHUB_OUTPUT"
+
+          echo "Source version: $SOURCE_VERSION"
+          echo "Source build:   $SOURCE_BUILD"
+
+          if [ "$SOURCE_BUILD" != "${{ env.IOS_BUILD_NUMBER }}" ]; then
+            echo "::warning::pubspec build number ($SOURCE_BUILD) differs from IOS_BUILD_NUMBER (${{ env.IOS_BUILD_NUMBER }})"
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -75,7 +81,7 @@ jobs:
 
       - name: Build Libgopeed for iOS
         env:
-          VERSION: ${{ needs.get-release.outputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
 
@@ -161,7 +167,7 @@ jobs:
 
       - name: Package IPA
         env:
-          VERSION: ${{ needs.get-release.outputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
 
@@ -191,9 +197,20 @@ jobs:
           path: ui/flutter/dist/*.ipa
           if-no-files-found: error
 
-      - name: Upload IPA to latest release
-        uses: shogo82148/actions-upload-release-asset@v1
-        with:
-          upload_url: ${{ needs.get-release.outputs.upload_url }}
-          asset_path: ui/flutter/dist/*
-          overwrite: true
+      - name: Upload IPA to matching release if present
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          TAG="v${VERSION}"
+          IPA="ui/flutter/dist/Gopeed-v${VERSION}-ios.ipa"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Uploading IPA to release $TAG"
+            gh release upload "$TAG" "$IPA" --clobber
+          else
+            echo "No release named $TAG exists in this fork."
+            echo "The IPA is still available as a workflow artifact."
+          fi
