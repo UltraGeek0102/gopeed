@@ -529,6 +529,39 @@ final class GopeedContinuedProcessingManager: NSObject {
     }
 
 
+    // MARK: - Async Gopeed invocation
+
+    private func invokeGopeed(
+        method: String,
+        path: String,
+        query: String = "",
+        body: String = "",
+        completion:
+            @escaping (String?) -> Void
+    ) {
+
+        GopeedInvokeAsyncNative(
+            method,
+            path,
+            query,
+            body
+        ) { [weak self] success, payload in
+
+            guard let self else {
+                return
+            }
+
+            self.workerQueue.async {
+                completion(
+                    success
+                    ? payload
+                    : nil
+                )
+            }
+        }
+    }
+
+
     // MARK: - Progress
 
     private struct RuntimeStatus {
@@ -539,54 +572,60 @@ final class GopeedContinuedProcessingManager: NSObject {
     }
 
     private func getRuntimeStatus(
-        taskID: String
-    ) -> RuntimeStatus? {
+        taskID: String,
+        completion:
+            @escaping (RuntimeStatus?) -> Void
+    ) {
 
-        let response = LibgopeedInvoke(
-            "GET",
-            "/api/v1/tasks/\(taskID)/status",
-            "",
-            ""
-        )
+        invokeGopeed(
+            method: "GET",
+            path:
+                "/api/v1/tasks/\(taskID)/status"
+        ) { response in
 
-        guard
-            let data =
-                response.data(
-                    using: .utf8
-                ),
-            let root =
-                try? JSONSerialization
-                    .jsonObject(
-                        with: data
-                    ) as? [String: Any],
-            let code =
-                (root["code"] as? NSNumber)?
-                    .intValue,
-            code == 0,
-            let body =
-                root["data"]
-                    as? [String: Any]
-        else {
-            return nil
+            guard
+                let response,
+                let data =
+                    response.data(
+                        using: .utf8
+                    ),
+                let root =
+                    try? JSONSerialization
+                        .jsonObject(
+                            with: data
+                        ) as? [String: Any],
+                let code =
+                    (root["code"] as? NSNumber)?
+                        .intValue,
+                code == 0,
+                let body =
+                    root["data"]
+                        as? [String: Any]
+            else {
+                completion(nil)
+                return
+            }
+
+            completion(
+                RuntimeStatus(
+                    status:
+                        body["status"]
+                            as? String ?? "",
+                    downloaded:
+                        (body["downloaded"]
+                            as? NSNumber)?
+                            .int64Value ?? 0,
+                    total:
+                        (body["total"]
+                            as? NSNumber)?
+                            .int64Value ?? 0,
+                    speed:
+                        (body["speed"]
+                            as? NSNumber)?
+                            .int64Value ?? 0
+                )
+            )
         }
-
-        return RuntimeStatus(
-            status:
-                body["status"]
-                    as? String ?? "",
-            downloaded:
-                (body["downloaded"]
-                    as? NSNumber)?
-                    .int64Value ?? 0,
-            total:
-                (body["total"]
-                    as? NSNumber)?
-                    .int64Value ?? 0,
-            speed:
-                (body["speed"]
-                    as? NSNumber)?
-                    .int64Value ?? 0
-        )
     }
 
     private func updateProgress(
@@ -594,135 +633,163 @@ final class GopeedContinuedProcessingManager: NSObject {
         force: Bool
     ) {
 
-        guard
-            let task = activeTasks[taskID]
-        else {
+        guard activeTasks[taskID] != nil else {
             return
         }
 
-        let now = Date()
+        let requestTime = Date()
 
         if !force,
            let previous =
                 lastProgressUpdate[taskID],
-           now.timeIntervalSince(previous)
+           requestTime.timeIntervalSince(previous)
                 < minimumProgressUpdateInterval {
 
             return
         }
 
-        guard
-            let runtime =
-                getRuntimeStatus(
-                    taskID: taskID
-                )
-        else {
-            return
-        }
+        // Mark before starting the async request so frequent
+        // task.progress events cannot create overlapping
+        // status requests.
+        lastProgressUpdate[taskID] =
+            requestTime
 
-        lastProgressUpdate[taskID] = now
+        getRuntimeStatus(
+            taskID: taskID
+        ) { [weak self] runtime in
 
-        let shouldUpdateTitle: Bool
-
-        if force {
-
-            shouldUpdateTitle = true
-
-        } else if let previous =
-                    lastTitleUpdate[taskID] {
-
-            shouldUpdateTitle =
-                now.timeIntervalSince(previous)
-                >= minimumTitleUpdateInterval
-
-        } else {
-
-            shouldUpdateTitle = true
-        }
-
-        let downloaded =
-            max(runtime.downloaded, 0)
-
-        let name =
-            taskNames[taskID]
-            ?? "Download"
-
-        if runtime.total > 0 {
-
-            let total =
-                max(runtime.total, 1)
-
-            let completed =
-                min(
-                    downloaded,
-                    total
-                )
-
-            // Real task progress remains frequent.
-            task.progress.totalUnitCount =
-                total
-
-            task.progress.completedUnitCount =
-                completed
-
-            // Visible title/subtitle only every ~5 seconds.
-            if shouldUpdateTitle {
-
-                let percent =
-                    Int(
-                        (
-                            Double(completed)
-                            / Double(total)
-                            * 100.0
-                        ).rounded()
-                    )
-
-                var subtitle =
-                    "\(percent)% • " +
-                    "\(formatBytes(completed)) / " +
-                    "\(formatBytes(total))"
-
-                if runtime.speed > 0 {
-                    subtitle +=
-                        " • \(formatBytes(runtime.speed))/s"
-                }
-
-                task.updateTitle(
-                    name,
-                    subtitle: subtitle
-                )
-
-                lastTitleUpdate[taskID] =
-                    now
+            guard
+                let self,
+                let runtime,
+                let task =
+                    self.activeTasks[taskID]
+            else {
+                return
             }
 
-        } else {
+            let now = Date()
 
-            // Unknown total size.
-            task.progress.totalUnitCount = 100
-            task.progress.completedUnitCount = 0
+            let shouldUpdateTitle: Bool
 
-            if shouldUpdateTitle {
+            if force {
 
-                var subtitle =
-                    formatBytes(downloaded)
+                shouldUpdateTitle = true
 
-                if runtime.speed > 0 {
-                    subtitle +=
-                        " • \(formatBytes(runtime.speed))/s"
-                }
+            } else if let previous =
+                        self.lastTitleUpdate[
+                            taskID
+                        ] {
 
-                task.updateTitle(
-                    name,
-                    subtitle: subtitle
+                shouldUpdateTitle =
+                    now.timeIntervalSince(
+                        previous
+                    )
+                    >=
+                    self.minimumTitleUpdateInterval
+
+            } else {
+
+                shouldUpdateTitle = true
+            }
+
+            let downloaded =
+                max(
+                    runtime.downloaded,
+                    0
                 )
 
-                lastTitleUpdate[taskID] =
-                    now
+            let name =
+                self.taskNames[taskID]
+                ?? "Download"
+
+            if runtime.total > 0 {
+
+                let total =
+                    max(runtime.total, 1)
+
+                let completed =
+                    min(
+                        downloaded,
+                        total
+                    )
+
+                task.progress
+                    .totalUnitCount =
+                    total
+
+                task.progress
+                    .completedUnitCount =
+                    completed
+
+                if shouldUpdateTitle {
+
+                    let percent =
+                        Int(
+                            (
+                                Double(
+                                    completed
+                                )
+                                / Double(total)
+                                * 100.0
+                            ).rounded()
+                        )
+
+                    var subtitle =
+                        "\(percent)% • " +
+                        "\(self.formatBytes(completed)) / " +
+                        "\(self.formatBytes(total))"
+
+                    if runtime.speed > 0 {
+                        subtitle +=
+                            " • " +
+                            "\(self.formatBytes(runtime.speed))/s"
+                    }
+
+                    task.updateTitle(
+                        name,
+                        subtitle:
+                            subtitle
+                    )
+
+                    self.lastTitleUpdate[
+                        taskID
+                    ] = now
+                }
+
+            } else {
+
+                task.progress
+                    .totalUnitCount = 100
+
+                task.progress
+                    .completedUnitCount = 0
+
+                if shouldUpdateTitle {
+
+                    var subtitle =
+                        self.formatBytes(
+                            downloaded
+                        )
+
+                    if runtime.speed > 0 {
+                        subtitle +=
+                            " • " +
+                            "\(self.formatBytes(runtime.speed))/s"
+                    }
+
+                    task.updateTitle(
+                        name,
+                        subtitle:
+                            subtitle
+                    )
+
+                    self.lastTitleUpdate[
+                        taskID
+                    ] = now
+                }
             }
         }
     }
-
 
     // MARK: - Completion
 
@@ -749,21 +816,15 @@ final class GopeedContinuedProcessingManager: NSObject {
             ) {
 
             if success,
-               let runtime =
-                    getRuntimeStatus(
-                        taskID: taskID
-                    ),
-               runtime.total > 0 {
-
-                task.progress.totalUnitCount =
-                    runtime.total
+               finalSubtitle ==
+                    "Download complete",
+               task.progress
+                    .totalUnitCount > 0 {
 
                 task.progress
                     .completedUnitCount =
-                    min(
-                        runtime.downloaded,
-                        runtime.total
-                    )
+                    task.progress
+                        .totalUnitCount
             }
 
             task.updateTitle(
@@ -808,7 +869,6 @@ final class GopeedContinuedProcessingManager: NSObject {
         )
     }
 
-
     // MARK: - Expiration / system cancellation
 
     private func handleExpiration(
@@ -841,12 +901,13 @@ final class GopeedContinuedProcessingManager: NSObject {
             taskID
         )
 
-        _ = LibgopeedInvoke(
-            "PUT",
-            "/api/v1/tasks/\(taskID)/pause",
-            "",
-            ""
-        )
+        invokeGopeed(
+            method: "PUT",
+            path:
+                "/api/v1/tasks/\(taskID)/pause"
+        ) { _ in
+            // Pause request completed.
+        }
 
         task.setTaskCompleted(
             success: false
