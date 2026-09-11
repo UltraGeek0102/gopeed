@@ -26,6 +26,7 @@ final class GopeedContinuedProcessingManager: NSObject {
 
     private var registeredIdentifiers = Set<String>()
     private var pendingTaskIDs = Set<String>()
+    private var expiringTaskIDs = Set<String>()
 
     private var activeTasks:
         [String: BGContinuedProcessingTask] = [:]
@@ -88,11 +89,6 @@ final class GopeedContinuedProcessingManager: NSObject {
     ) {
         stateLock.lock()
         enabledSnapshot = enabled
-
-        if !enabled {
-            handledTaskIDs.removeAll()
-        }
-
         stateLock.unlock()
     }
 
@@ -109,6 +105,34 @@ final class GopeedContinuedProcessingManager: NSObject {
         }
 
         stateLock.unlock()
+    }
+
+    private func handledTaskIDsSnapshot() -> [String] {
+        stateLock.lock()
+        let ids = Array(handledTaskIDs)
+        stateLock.unlock()
+
+        return ids
+    }
+
+    private func setTaskOwnership(
+        taskID: String,
+        handled: Bool
+    ) {
+        setHandledSnapshot(
+            taskID: taskID,
+            handled: handled
+        )
+
+        // This is a second layer of protection in addition to the
+        // Objective-C forwarder. If Continued Processing owns a task,
+        // the custom ActivityKit manager must not create a second
+        // Live Activity for it.
+        GopeedLiveActivityManager.shared
+            .setTaskSuppressed(
+                handled,
+                taskID: taskID
+            )
     }
 
 
@@ -157,7 +181,7 @@ final class GopeedContinuedProcessingManager: NSObject {
             type == "task.start",
             let taskID = json["taskId"] as? String
         {
-            setHandledSnapshot(
+            setTaskOwnership(
                 taskID: taskID,
                 handled: true
             )
@@ -280,7 +304,7 @@ final class GopeedContinuedProcessingManager: NSObject {
     ) {
 
         guard currentEnabledSnapshot() else {
-            setHandledSnapshot(
+            setTaskOwnership(
                 taskID: taskID,
                 handled: false
             )
@@ -314,7 +338,7 @@ final class GopeedContinuedProcessingManager: NSObject {
                 taskID
             )
 
-            setHandledSnapshot(
+            setTaskOwnership(
                 taskID: taskID,
                 handled: false
             )
@@ -326,7 +350,7 @@ final class GopeedContinuedProcessingManager: NSObject {
             !pendingTaskIDs.contains(taskID),
             activeTasks[taskID] == nil
         else {
-            setHandledSnapshot(
+            setTaskOwnership(
                 taskID: taskID,
                 handled: true
             )
@@ -392,7 +416,7 @@ final class GopeedContinuedProcessingManager: NSObject {
                     forKey: taskID
                 )
 
-                setHandledSnapshot(
+                setTaskOwnership(
                     taskID: taskID,
                     handled: false
                 )
@@ -413,11 +437,11 @@ final class GopeedContinuedProcessingManager: NSObject {
                     "Preparing download…"
             )
 
-        request.strategy = .fail
+        request.strategy = .queue
 
         pendingTaskIDs.insert(taskID)
 
-        setHandledSnapshot(
+        setTaskOwnership(
             taskID: taskID,
             handled: true
         )
@@ -448,7 +472,7 @@ final class GopeedContinuedProcessingManager: NSObject {
                 forKey: taskID
             )
 
-            setHandledSnapshot(
+            setTaskOwnership(
                 taskID: taskID,
                 handled: false
             )
@@ -472,7 +496,7 @@ final class GopeedContinuedProcessingManager: NSObject {
 
         guard currentEnabledSnapshot() else {
 
-            setHandledSnapshot(
+            setTaskOwnership(
                 taskID: taskID,
                 handled: false
             )
@@ -489,7 +513,7 @@ final class GopeedContinuedProcessingManager: NSObject {
         activeTasks[taskID] = task
         taskNames[taskID] = name
 
-        setHandledSnapshot(
+        setTaskOwnership(
             taskID: taskID,
             handled: true
         )
@@ -855,7 +879,7 @@ final class GopeedContinuedProcessingManager: NSObject {
             forKey: taskID
         )
 
-        setHandledSnapshot(
+        setTaskOwnership(
             taskID: taskID,
             handled: false
         )
@@ -881,6 +905,7 @@ final class GopeedContinuedProcessingManager: NSObject {
         )
 
         pendingTaskIDs.remove(taskID)
+        expiringTaskIDs.insert(taskID)
 
         lastProgressUpdate.removeValue(
             forKey: taskID
@@ -890,9 +915,12 @@ final class GopeedContinuedProcessingManager: NSObject {
             forKey: taskID
         )
 
-        setHandledSnapshot(
+        // Keep ownership/suppression active until the pause request
+        // has been delivered. Otherwise progress events arriving in
+        // this small window can start a custom ActivityKit activity.
+        setTaskOwnership(
             taskID: taskID,
-            handled: false
+            handled: true
         )
 
         print(
@@ -901,17 +929,38 @@ final class GopeedContinuedProcessingManager: NSObject {
             taskID
         )
 
+        task.setTaskCompleted(
+            success: false
+        )
+
         invokeGopeed(
             method: "PUT",
             path:
                 "/api/v1/tasks/\(taskID)/pause"
-        ) { _ in
-            // Pause request completed.
+        ) { [weak self] _ in
+            self?.finishExpirationCleanup(
+                taskID: taskID
+            )
         }
 
-        task.setTaskCompleted(
-            success: false
-        )
+        // Defensive fallback in case the async bridge never calls
+        // back because the process is being suspended.
+        workerQueue.asyncAfter(
+            deadline: .now() + 2.0
+        ) { [weak self] in
+            self?.finishExpirationCleanup(
+                taskID: taskID
+            )
+        }
+    }
+
+    private func finishExpirationCleanup(
+        taskID: String
+    ) {
+
+        guard expiringTaskIDs.remove(taskID) != nil else {
+            return
+        }
 
         taskIdentifiers.removeValue(
             forKey: taskID
@@ -920,12 +969,26 @@ final class GopeedContinuedProcessingManager: NSObject {
         taskNames.removeValue(
             forKey: taskID
         )
+
+        setTaskOwnership(
+            taskID: taskID,
+            handled: false
+        )
     }
 
 
     // MARK: - Disable all BGCPT tasks
 
     private func stopAllContinuedTasks() {
+
+        let ownedTaskIDs =
+            Set(
+                handledTaskIDsSnapshot()
+                + Array(taskIdentifiers.keys)
+                + Array(pendingTaskIDs)
+                + Array(activeTasks.keys)
+                + Array(expiringTaskIDs)
+            )
 
         for (
             taskID,
@@ -944,19 +1007,22 @@ final class GopeedContinuedProcessingManager: NSObject {
                     success: true
                 )
             }
-
-            setHandledSnapshot(
-                taskID: taskID,
-                handled: false
-            )
         }
 
         activeTasks.removeAll()
         pendingTaskIDs.removeAll()
+        expiringTaskIDs.removeAll()
         taskIdentifiers.removeAll()
         taskNames.removeAll()
         lastProgressUpdate.removeAll()
         lastTitleUpdate.removeAll()
+
+        for taskID in ownedTaskIDs {
+            setTaskOwnership(
+                taskID: taskID,
+                handled: false
+            )
+        }
     }
 
 
