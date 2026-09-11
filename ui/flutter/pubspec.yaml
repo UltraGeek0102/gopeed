@@ -16,7 +16,7 @@ publish_to: "none" # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 2.0.0-beta.1+1
+version: 2.0.0-beta.2+2
 
 environment:
   sdk: ^3.11.4
@@ -108,6 +108,7 @@ dependency_overrides:
       path: permission_handler_windows
 
 dev_dependencies:
+  app_links_platform_interface: ^2.0.2
   flutter_test:
     sdk: flutter
 
@@ -211,7 +212,7 @@ ffigen:
       - "StartAPIServer"
       - "StopAPIServer"
       - "RestartAPIServer"
-      - "Invoke"
+      - "InvokeAsync"
       - "SubscribeTaskEvents"
       - "FreeCString"
   structs:
