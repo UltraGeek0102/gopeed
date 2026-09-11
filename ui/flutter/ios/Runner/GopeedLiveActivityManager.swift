@@ -30,18 +30,32 @@ final class GopeedLiveActivityManager: NSObject {
         taskID: String
     ) {
         stateLock.lock()
-
+    
         if suppressed {
             suppressedTaskIDs.insert(taskID)
         } else {
             suppressedTaskIDs.remove(taskID)
         }
-
+    
         stateLock.unlock()
-
+    
         if suppressed {
-            Task {
-                await removeAllActivities(
+            guard #available(iOS 16.2, *) else {
+                return
+            }
+    
+            Task { [weak self] in
+                guard let self else {
+                    return
+                }
+    
+                // Suppression may have been removed again if BGCPT
+                // submission failed before this async cleanup runs.
+                guard self.isTaskSuppressed(taskID) else {
+                    return
+                }
+    
+                await self.removeAllActivities(
                     taskID: taskID,
                     reason: "suppressed by continued processing"
                 )
