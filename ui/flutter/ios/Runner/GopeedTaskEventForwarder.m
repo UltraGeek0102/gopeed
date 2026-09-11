@@ -49,6 +49,45 @@
 
 @end
 
+
+@interface GopeedNativeInvokeResultForwarder
+    : NSObject <LibgopeedInvokeResultListener>
+
+@property(nonatomic, copy, nullable)
+    GopeedNativeInvokeCompletion completion;
+
+- (instancetype)initWithCompletion:
+    (GopeedNativeInvokeCompletion)completion;
+
+@end
+
+@implementation GopeedNativeInvokeResultForwarder
+
+- (instancetype)initWithCompletion:
+    (GopeedNativeInvokeCompletion)completion {
+  self = [super init];
+  if (self) {
+    _completion = [completion copy];
+  }
+  return self;
+}
+
+- (void)onResult:(int64_t)requestID
+         success:(BOOL)success
+         payload:(NSString * _Nullable)payload {
+  GopeedNativeInvokeCompletion completion =
+      self.completion;
+  self.completion = nil;
+
+  if (completion == nil) {
+    return;
+  }
+
+  completion(success, payload ?: @"");
+}
+
+@end
+
 @implementation GopeedTaskEventForwarder
 
 - (instancetype)initWithChannel:(FlutterMethodChannel *)channel {
@@ -136,3 +175,27 @@ void GopeedInvokeAsyncWithResult(
       [[GopeedInvokeResultForwarder alloc] initWithResult:result];
   LibgopeedInvokeAsync(method, path, query, body, requestID, forwarder);
 }
+
+void GopeedInvokeAsyncNative(
+    NSString *method,
+    NSString *path,
+    NSString *query,
+    NSString *body,
+    GopeedNativeInvokeCompletion completion) {
+  if (completion == nil) {
+    return;
+  }
+
+  GopeedNativeInvokeResultForwarder *forwarder =
+      [[GopeedNativeInvokeResultForwarder alloc]
+          initWithCompletion:completion];
+
+  LibgopeedInvokeAsync(
+      method,
+      path,
+      query,
+      body,
+      0,
+      forwarder);
+}
+
