@@ -187,17 +187,13 @@ class AppRuntimeController extends AsyncNotifier<AppRuntimeState> {
       startupError: startupError,
     );
     if (Util.isIOS()) {
-      unawaited(
-
-        ContinuedProcessing.setEnabled(
-
-          config.extra
-
-              .backgroundContinuedProcessing,
-
-        ),
-
+      // Make sure the native Continued Processing manager has the
+      // persisted setting before app initialization completes. This
+      // avoids the first download racing ahead of setEnabled(true).
+      await ContinuedProcessing.setEnabled(
+        config.extra.backgroundContinuedProcessing,
       );
+
       LocationKeepAliveCoordinator.instance.start(
         () =>
             state.value?.downloaderConfig.extra.backgroundLocationKeepAlive ?? config.extra.backgroundLocationKeepAlive,
