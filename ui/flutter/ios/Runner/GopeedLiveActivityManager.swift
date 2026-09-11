@@ -12,10 +12,108 @@ final class GopeedLiveActivityManager: NSObject {
     // There is no reason to hit ActivityKit that frequently.
     private let minimumUpdateInterval: TimeInterval = 2.0
 
+    private let stateLock = NSLock()
+
     private var lastUpdateTime: [String: Date] = [:]
+    private var suppressedTaskIDs = Set<String>()
+    private var activityCreationInProgress = Set<String>()
 
     private override init() {
         super.init()
+    }
+
+
+    // MARK: - BGCPT coordination
+
+    func setTaskSuppressed(
+        _ suppressed: Bool,
+        taskID: String
+    ) {
+        stateLock.lock()
+
+        if suppressed {
+            suppressedTaskIDs.insert(taskID)
+        } else {
+            suppressedTaskIDs.remove(taskID)
+        }
+
+        stateLock.unlock()
+
+        if suppressed {
+            Task {
+                await removeAllActivities(
+                    taskID: taskID,
+                    reason: "suppressed by continued processing"
+                )
+            }
+        }
+    }
+
+    private func isTaskSuppressed(
+        _ taskID: String
+    ) -> Bool {
+        stateLock.lock()
+        let suppressed =
+            suppressedTaskIDs.contains(taskID)
+        stateLock.unlock()
+
+        return suppressed
+    }
+
+    private func beginActivityCreation(
+        taskID: String
+    ) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        guard
+            !suppressedTaskIDs.contains(taskID),
+            !activityCreationInProgress.contains(taskID)
+        else {
+            return false
+        }
+
+        activityCreationInProgress.insert(taskID)
+        return true
+    }
+
+    private func endActivityCreation(
+        taskID: String
+    ) {
+        stateLock.lock()
+        activityCreationInProgress.remove(taskID)
+        stateLock.unlock()
+    }
+
+    private func shouldHandleProgress(
+        taskID: String,
+        now: Date
+    ) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        guard !suppressedTaskIDs.contains(taskID) else {
+            return false
+        }
+
+        if let previous = lastUpdateTime[taskID],
+           now.timeIntervalSince(previous)
+                < minimumUpdateInterval {
+            return false
+        }
+
+        lastUpdateTime[taskID] = now
+        return true
+    }
+
+    private func clearUpdateTime(
+        taskID: String
+    ) {
+        stateLock.lock()
+        lastUpdateTime.removeValue(
+            forKey: taskID
+        )
+        stateLock.unlock()
     }
 
     // MARK: - Gopeed event entry point
@@ -35,6 +133,10 @@ final class GopeedLiveActivityManager: NSObject {
             let taskID = json["taskId"] as? String
         else {
             print("LiveActivity: invalid task event payload")
+            return
+        }
+
+        guard !isTaskSuppressed(taskID) else {
             return
         }
 
@@ -107,16 +209,12 @@ final class GopeedLiveActivityManager: NSObject {
     ) {
         let now = Date()
 
-        if let previous = lastUpdateTime[taskID] {
-            let elapsed =
-                now.timeIntervalSince(previous)
-
-            if elapsed < minimumUpdateInterval {
-                return
-            }
+        guard shouldHandleProgress(
+            taskID: taskID,
+            now: now
+        ) else {
+            return
         }
-
-        lastUpdateTime[taskID] = now
 
         Task {
             await refreshActivity(
@@ -355,16 +453,45 @@ final class GopeedLiveActivityManager: NSObject {
     // MARK: - Find existing Activity
 
     @available(iOS 16.2, *)
-    private func findActivity(
+    private func findActivities(
         taskID: String
-    ) -> Activity<GopeedDownloadAttributes>? {
+    ) -> [Activity<GopeedDownloadAttributes>] {
 
         return Activity<
             GopeedDownloadAttributes
         >
         .activities
-        .first {
+        .filter {
             $0.attributes.taskId == taskID
+        }
+    }
+
+    @available(iOS 16.2, *)
+    private func collapseDuplicateActivities(
+        _ activities: [Activity<GopeedDownloadAttributes>],
+        content: ActivityContent<GopeedDownloadAttributes.ContentState>
+    ) async {
+
+        guard let primary = activities.first else {
+            return
+        }
+
+        await primary.update(content)
+
+        if activities.count > 1 {
+            for duplicate in activities.dropFirst() {
+                await duplicate.end(
+                    nil,
+                    dismissalPolicy: .immediate
+                )
+            }
+
+            print(
+                "LiveActivity: removed",
+                activities.count - 1,
+                "duplicate activity/activities for",
+                primary.attributes.taskId
+            )
         }
     }
 
@@ -378,12 +505,20 @@ final class GopeedLiveActivityManager: NSObject {
         allowStart: Bool
     ) async {
 
+        guard !isTaskSuppressed(taskID) else {
+            return
+        }
+
         guard
             let runtime =
                 await getRuntimeStatus(
                     taskID: taskID
                 )
         else {
+            return
+        }
+
+        guard !isTaskSuppressed(taskID) else {
             return
         }
 
@@ -396,16 +531,19 @@ final class GopeedLiveActivityManager: NSObject {
                 staleDate: nil
             )
 
-        // Activity already exists → update it.
-        if let activity =
-            findActivity(taskID: taskID) {
+        let existing =
+            findActivities(
+                taskID: taskID
+            )
 
-            await activity.update(content)
-
+        if !existing.isEmpty {
+            await collapseDuplicateActivities(
+                existing,
+                content: content
+            )
             return
         }
 
-        // Don't create a new Activity for pause/etc.
         guard allowStart else {
             return
         }
@@ -420,8 +558,6 @@ final class GopeedLiveActivityManager: NSObject {
             return
         }
 
-        // A local Live Activity should be started while
-        // the application is in the foreground.
         let appIsActive =
             await MainActor.run {
                 UIApplication.shared
@@ -429,6 +565,41 @@ final class GopeedLiveActivityManager: NSObject {
             }
 
         guard appIsActive else {
+            return
+        }
+
+        // Only one async caller may pass the creation gate for
+        // a given Gopeed task. This prevents task.start and early
+        // task.progress callbacks from creating multiple activities
+        // while their async status requests overlap.
+        guard beginActivityCreation(
+            taskID: taskID
+        ) else {
+            return
+        }
+
+        defer {
+            endActivityCreation(
+                taskID: taskID
+            )
+        }
+
+        guard !isTaskSuppressed(taskID) else {
+            return
+        }
+
+        // Re-check after acquiring the creation gate because an
+        // earlier request may have created the activity already.
+        let recheck =
+            findActivities(
+                taskID: taskID
+            )
+
+        if !recheck.isEmpty {
+            await collapseDuplicateActivities(
+                recheck,
+                content: content
+            )
             return
         }
 
@@ -445,6 +616,17 @@ final class GopeedLiveActivityManager: NSObject {
                     content: content,
                     pushType: nil
                 )
+
+            // Continued Processing may have claimed the task while
+            // Activity.request was in progress. If so, remove this
+            // custom activity immediately.
+            if isTaskSuppressed(taskID) {
+                await activity.end(
+                    nil,
+                    dismissalPolicy: .immediate
+                )
+                return
+            }
 
             print(
                 "LiveActivity: started",
@@ -468,58 +650,62 @@ final class GopeedLiveActivityManager: NSObject {
         taskID: String
     ) async {
 
-        guard
-            let activity =
-                findActivity(taskID: taskID)
-        else {
-            lastUpdateTime.removeValue(
-                forKey: taskID
+        let activities =
+            findActivities(
+                taskID: taskID
+            )
+
+        guard !activities.isEmpty else {
+            clearUpdateTime(
+                taskID: taskID
             )
             return
         }
 
-        let oldState =
-            activity.content.state
-
-        let finalTotal =
-            max(
-                oldState.total,
-                oldState.downloaded
-            )
-
         let now = Date()
 
-        let finalState =
-            GopeedDownloadAttributes
-                .ContentState(
-                    progress: 1.0,
-                    downloaded: finalTotal,
-                    total: finalTotal,
-                    speed: 0,
-                    status: "done",
-                    estimatedStart: now,
-                    estimatedEnd:
-                        now.addingTimeInterval(1),
-                    usesEstimatedProgress: false
+        for activity in activities {
+            let oldState =
+                activity.content.state
+
+            let finalTotal =
+                max(
+                    oldState.total,
+                    oldState.downloaded
                 )
 
-        let finalContent =
-            ActivityContent(
-                state: finalState,
-                staleDate: nil
+            let finalState =
+                GopeedDownloadAttributes
+                    .ContentState(
+                        progress: 1.0,
+                        downloaded: finalTotal,
+                        total: finalTotal,
+                        speed: 0,
+                        status: "done",
+                        estimatedStart: now,
+                        estimatedEnd:
+                            now.addingTimeInterval(1),
+                        usesEstimatedProgress: false
+                    )
+
+            let finalContent =
+                ActivityContent(
+                    state: finalState,
+                    staleDate: nil
+                )
+
+            await activity.end(
+                finalContent,
+                dismissalPolicy:
+                    .after(
+                        Date()
+                            .addingTimeInterval(15)
+                    )
             )
+        }
 
-        await activity.end(
-            finalContent,
-            dismissalPolicy:
-                .after(
-                    Date()
-                        .addingTimeInterval(15)
-                )
-        )
-
-        lastUpdateTime.removeValue(
-            forKey: taskID
+        clearUpdateTime(
+            taskID: taskID
         )
 
         print(
@@ -537,52 +723,56 @@ final class GopeedLiveActivityManager: NSObject {
         error: String
     ) async {
 
-        guard
-            let activity =
-                findActivity(taskID: taskID)
-        else {
-            lastUpdateTime.removeValue(
-                forKey: taskID
+        let activities =
+            findActivities(
+                taskID: taskID
+            )
+
+        guard !activities.isEmpty else {
+            clearUpdateTime(
+                taskID: taskID
             )
             return
         }
 
-        let old =
-            activity.content.state
-
         let now = Date()
 
-        let failedState =
-            GopeedDownloadAttributes
-                .ContentState(
-                    progress: old.progress,
-                    downloaded: old.downloaded,
-                    total: old.total,
-                    speed: 0,
-                    status: "error",
-                    estimatedStart: now,
-                    estimatedEnd:
-                        now.addingTimeInterval(1),
-                    usesEstimatedProgress: false
+        for activity in activities {
+            let old =
+                activity.content.state
+
+            let failedState =
+                GopeedDownloadAttributes
+                    .ContentState(
+                        progress: old.progress,
+                        downloaded: old.downloaded,
+                        total: old.total,
+                        speed: 0,
+                        status: "error",
+                        estimatedStart: now,
+                        estimatedEnd:
+                            now.addingTimeInterval(1),
+                        usesEstimatedProgress: false
+                    )
+
+            let content =
+                ActivityContent(
+                    state: failedState,
+                    staleDate: nil
                 )
 
-        let content =
-            ActivityContent(
-                state: failedState,
-                staleDate: nil
+            await activity.end(
+                content,
+                dismissalPolicy:
+                    .after(
+                        Date()
+                            .addingTimeInterval(30)
+                    )
             )
+        }
 
-        await activity.end(
-            content,
-            dismissalPolicy:
-                .after(
-                    Date()
-                        .addingTimeInterval(30)
-                )
-        )
-
-        lastUpdateTime.removeValue(
-            forKey: taskID
+        clearUpdateTime(
+            taskID: taskID
         )
 
         print(
@@ -593,29 +783,50 @@ final class GopeedLiveActivityManager: NSObject {
     }
 
 
-    // MARK: - Delete Activity
+    // MARK: - Delete / suppression cleanup
 
     @available(iOS 16.2, *)
     private func removeActivity(
         taskID: String
     ) async {
 
-        if let activity =
-            findActivity(taskID: taskID) {
+        await removeAllActivities(
+            taskID: taskID,
+            reason: "removed"
+        )
+    }
 
+    @available(iOS 16.2, *)
+    private func removeAllActivities(
+        taskID: String,
+        reason: String
+    ) async {
+
+        let activities =
+            findActivities(
+                taskID: taskID
+            )
+
+        for activity in activities {
             await activity.end(
                 nil,
                 dismissalPolicy: .immediate
             )
         }
 
-        lastUpdateTime.removeValue(
-            forKey: taskID
+        clearUpdateTime(
+            taskID: taskID
         )
 
-        print(
-            "LiveActivity: removed",
-            taskID
-        )
+        if !activities.isEmpty {
+            print(
+                "LiveActivity:",
+                reason,
+                taskID,
+                "count:",
+                activities.count
+            )
+        }
     }
+
 }
