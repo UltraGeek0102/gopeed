@@ -12,6 +12,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shad;
 import 'package:window_manager/window_manager.dart';
+import 'package:gopeed/features/home/presentation/pages/home_page.dart';
 import 'package:gopeed/app/app.dart';
 import 'package:gopeed/app/router/app_router.dart';
 import 'package:gopeed/core/capabilities/app_capabilities.dart';
@@ -411,6 +412,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('No matching tasks found'), findsOneWidget);
+    expect(find.byKey(const ValueKey('tasks-empty-create-button')), findsNothing);
     expect(find.text('No tasks in this list'), findsNothing);
   });
 
@@ -437,6 +439,20 @@ void main() {
     expect(find.text('Downloading 0'), findsOneWidget);
     expect(find.text('Completed 0'), findsOneWidget);
     expect(find.text('Failed 0'), findsOneWidget);
+    expect(find.text('Create Task'), findsOneWidget);
+    final headerCreate = find.byKey(const ValueKey('tasks-mobile-create-button'));
+    expect(tester.getSize(headerCreate).height, 34);
+    final batchButton = find.byKey(const ValueKey('tasks-mobile-batch-button'));
+    expect(tester.getRect(headerCreate).height, tester.getRect(batchButton).height);
+    expect(tester.getRect(headerCreate).top, tester.getRect(batchButton).top);
+    expect(tester.getRect(headerCreate).bottom, tester.getRect(batchButton).bottom);
+    expect(tester.getBottomLeft(headerCreate).dy, lessThan(tester.getTopLeft(find.text('Downloading 0')).dy));
+    for (final size in [const Size(320, 568), const Size(768, 1024)]) {
+      tester.view.physicalSize = size;
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(find.byKey(const ValueKey('tasks-empty-create-button')), findsOneWidget);
+    }
   });
 
   testWidgets('extensions grid adds columns from a minimum card width and keeps desktop toolbar aligned', (
@@ -2254,15 +2270,16 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('settings mobile back returns one level before requiring a second back to exit', (
-    WidgetTester tester,
-  ) async {
+  testWidgets('settings mobile back returns through home before confirming exit', (WidgetTester tester) async {
     await _setTestSize(tester, const Size(390, 760));
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     var systemPopCalls = 0;
+    bool? frameworkHandlesBack;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
       if (call.method == 'SystemNavigator.pop') systemPopCalls++;
+      if (call.method == 'SystemNavigator.setFrameworkHandlesBack') frameworkHandlesBack = call.arguments as bool;
       return null;
     });
     addTearDown(() {
@@ -2281,6 +2298,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    expect(frameworkHandlesBack, isTrue);
     await tester.tap(find.text('Settings'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Basic'));
@@ -2293,6 +2311,13 @@ void main() {
     expect(find.text('SETTINGS'), findsOneWidget);
     expect(find.byKey(const ValueKey('theme-mode-system')), findsNothing);
     expect(systemPopCalls, 0);
+
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.byType(HomePage), findsOneWidget);
+    expect(find.text('Press back again to exit'), findsNothing);
+    expect(systemPopCalls, 0);
+    expect(frameworkHandlesBack, isTrue);
 
     await tester.binding.handlePopRoute();
     await tester.pump();
