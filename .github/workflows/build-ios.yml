@@ -155,7 +155,11 @@ jobs:
             echo "  version: $SHORT_VERSION"
             echo "  build:   $BUILD_VERSION"
 
-            test "$SHORT_VERSION" = "${{ env.IOS_MARKETING_VERSION }}"
+            if [ "$BUNDLE" = "$SHARE" ]; then
+              test "$SHORT_VERSION" = "1.0"
+            else
+              test "$SHORT_VERSION" = "${{ env.IOS_MARKETING_VERSION }}"
+            fi
             test "$BUILD_VERSION" = "${{ env.IOS_BUILD_NUMBER }}"
           done
 
