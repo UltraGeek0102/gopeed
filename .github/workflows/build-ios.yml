@@ -1,0 +1,220 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+
+env:
+  GO_VERSION: "1.25.4"
+  FLUTTER_VERSION: "3.41.6"
+  IOS_MARKETING_VERSION: "2.0.0"
+  IOS_BUILD_NUMBER: "2"
+  GA4_MEASUREMENT_ID: ${{ secrets.GA4_MEASUREMENT_ID }}
+  GA4_API_SECRET: ${{ secrets.GA4_API_SECRET }}
+
+permissions:
+  contents: write
+
+jobs:
+  build-ios:
+    name: Build iOS IPA
+    runs-on: macos-26
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve source version
+        id: version
+        run: |
+          set -euo pipefail
+
+          RAW_VERSION=$(awk '/^version:/ { print $2; exit }' ui/flutter/pubspec.yaml)
+          SOURCE_VERSION="${RAW_VERSION%%+*}"
+          SOURCE_BUILD="${RAW_VERSION##*+}"
+
+          test -n "$SOURCE_VERSION"
+          test -n "$SOURCE_BUILD"
+
+          echo "version=$SOURCE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$SOURCE_BUILD" >> "$GITHUB_OUTPUT"
+
+          echo "Source version: $SOURCE_VERSION"
+          echo "Source build:   $SOURCE_BUILD"
+
+          if [ "$SOURCE_BUILD" != "${{ env.IOS_BUILD_NUMBER }}" ]; then
+            echo "::warning::pubspec build number ($SOURCE_BUILD) differs from IOS_BUILD_NUMBER (${{ env.IOS_BUILD_NUMBER }})"
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Verify permanent Live Activity target
+        run: |
+          set -euo pipefail
+
+          test -f ui/flutter/ios/GopeedLiveActivity/GopeedLiveActivityWidget.swift
+          test -f ui/flutter/ios/GopeedLiveActivity/Info.plist
+          test -f ui/flutter/ios/Runner/GopeedDownloadAttributes.swift
+          test -f ui/flutter/ios/Runner/GopeedLiveActivityManager.swift
+          test -f ui/flutter/ios/Runner/GopeedContinuedProcessingManager.swift
+
+          echo "=== Xcode targets ==="
+          xcodebuild \
+            -project ui/flutter/ios/Runner.xcodeproj \
+            -list
+
+          grep -q "GopeedLiveActivityExtension" \
+            ui/flutter/ios/Runner.xcodeproj/project.pbxproj
+
+      - name: Build Libgopeed for iOS
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go get golang.org/x/mobile/bind
+          gomobile init
+
+          rm -rf ui/flutter/ios/Frameworks/Libgopeed.xcframework
+
+          gomobile bind \
+            -tags nosqlite \
+            -ldflags="-w -s -X github.com/GopeedLab/gopeed/pkg/base.Version=$VERSION" \
+            -o ui/flutter/ios/Frameworks/Libgopeed.xcframework \
+            -target=ios \
+            github.com/GopeedLab/gopeed/bind/mobile
+
+      - name: Build unsigned iOS app
+        run: |
+          set -euo pipefail
+      
+          cat > "$RUNNER_TEMP/gopeed-version.xcconfig" <<EOF
+          FLUTTER_BUILD_NAME = ${{ env.IOS_MARKETING_VERSION }}
+          FLUTTER_BUILD_NUMBER = ${{ env.IOS_BUILD_NUMBER }}
+          EOF
+      
+          echo "=== Shared iOS version settings ==="
+          cat "$RUNNER_TEMP/gopeed-version.xcconfig"
+      
+          export XCODE_XCCONFIG_FILE="$RUNNER_TEMP/gopeed-version.xcconfig"
+      
+          cd ui/flutter
+      
+          flutter build ios -v \
+            --no-codesign \
+            --build-name="${{ env.IOS_MARKETING_VERSION }}" \
+            --build-number="${{ env.IOS_BUILD_NUMBER }}" \
+            --dart-define="UPDATE_CHANNEL=iosIpa" \
+            --dart-define="GA4_MEASUREMENT_ID=${{ env.GA4_MEASUREMENT_ID }}" \
+            --dart-define="GA4_API_SECRET=${{ env.GA4_API_SECRET }}"
+
+      - name: Verify embedded extensions and versions
+        run: |
+          set -euo pipefail
+
+          APP="ui/flutter/build/ios/iphoneos/Runner.app"
+          PLUGINS="$APP/PlugIns"
+          SHARE="$PLUGINS/ShareExtension.appex"
+          LIVE_ACTIVITY="$PLUGINS/GopeedLiveActivityExtension.appex"
+
+          test -d "$APP"
+          test -d "$SHARE"
+          test -d "$LIVE_ACTIVITY"
+
+          echo "=== Embedded extensions ==="
+          find "$PLUGINS" \
+            -maxdepth 1 \
+            -name "*.appex" \
+            -print
+
+          echo
+          echo "=== Bundle versions ==="
+
+          for BUNDLE in "$APP" "$SHARE" "$LIVE_ACTIVITY"; do
+            PLIST="$BUNDLE/Info.plist"
+
+            IDENTIFIER=$(/usr/libexec/PlistBuddy \
+              -c "Print :CFBundleIdentifier" "$PLIST")
+
+            SHORT_VERSION=$(/usr/libexec/PlistBuddy \
+              -c "Print :CFBundleShortVersionString" "$PLIST")
+
+            BUILD_VERSION=$(/usr/libexec/PlistBuddy \
+              -c "Print :CFBundleVersion" "$PLIST")
+
+            echo "$BUNDLE"
+            echo "  id:      $IDENTIFIER"
+            echo "  version: $SHORT_VERSION"
+            echo "  build:   $BUILD_VERSION"
+
+            test "$SHORT_VERSION" = "${{ env.IOS_MARKETING_VERSION }}"
+            test "$BUILD_VERSION" = "${{ env.IOS_BUILD_NUMBER }}"
+          done
+
+          echo
+          echo "=== Runner Live Activity setting ==="
+          /usr/libexec/PlistBuddy \
+            -c "Print :NSSupportsLiveActivities" \
+            "$APP/Info.plist"
+
+          echo
+          echo "All app/extension version numbers match."
+          echo "Live Activity extension is embedded successfully."
+
+      - name: Package IPA
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          cd ui/flutter
+
+          rm -rf Payload dist Payload.zip
+          mkdir -p Payload dist
+
+          cp -R build/ios/iphoneos/Runner.app Payload/
+
+          zip -r -y -q Payload.zip Payload/Runner.app
+          mv Payload.zip "dist/Gopeed-v${VERSION}-ios.ipa"
+
+          echo
+          echo "=== IPA created ==="
+          ls -lh "dist/Gopeed-v${VERSION}-ios.ipa"
+
+          echo
+          echo "=== Live Activity extension inside IPA ==="
+          unzip -l "dist/Gopeed-v${VERSION}-ios.ipa" \
+            | grep "GopeedLiveActivityExtension.appex"
+
+      - name: Upload IPA as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gopeed-iOS-IPA
+          path: ui/flutter/dist/*.ipa
+          if-no-files-found: error
+
+      - name: Upload IPA to matching release if present
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          TAG="v${VERSION}"
+          IPA="ui/flutter/dist/Gopeed-v${VERSION}-ios.ipa"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Uploading IPA to release $TAG"
+            gh release upload "$TAG" "$IPA" --clobber
+          else
+            echo "No release named $TAG exists in this fork."
+            echo "The IPA is still available as a workflow artifact."
+          fi
