@@ -1,88 +1,95 @@
-name: Delete Workflows
+name: Clear Workflow Runs
 
 on:
   workflow_dispatch:
     inputs:
-      confirmation:
-        description: 'Type DELETE to remove all other workflow files'
+      days:
+        description: "Keep runs newer than this many days (0 = delete regardless of age)"
         required: true
-        type: string
+        default: "0"
+
+      minimum_runs:
+        description: "Minimum number of runs to keep per workflow (0 = keep none)"
+        required: true
+        default: "0"
+
+      workflow_pattern:
+        description: "Workflow name or filename to target (leave blank = all workflows)"
+        required: false
+        default: ""
+
+      workflow_state:
+        description: "Target workflows by state"
+        required: true
+        default: "ALL"
+        type: choice
+        options:
+          - "ALL"
+          - active
+          - deleted
+          - disabled_fork
+          - disabled_inactivity
+          - disabled_manually
+
+      conclusion:
+        description: "Which workflow runs should be deleted"
+        required: true
+        default: "ALL"
+        type: choice
+        options:
+          - "ALL"
+          - "Unsuccessful"
+          - action_required
+          - cancelled
+          - failure
+          - skipped
+          - success
+
+      keep_existing_branches:
+        description: "Keep runs belonging to branches that still exist"
+        required: true
+        default: false
+        type: boolean
+
+      keep_pull_requests:
+        description: "Keep runs associated with pull requests"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
-  contents: write
+  actions: write
+  contents: read
 
 jobs:
   cleanup:
-    name: Delete Other Workflows
+    name: Clear Workflow Runs
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check confirmation
-        run: |
-          if [ "${{ inputs.confirmation }}" != "DELETE" ]; then
-            echo "Confirmation must be exactly: DELETE"
-            exit 1
-          fi
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Delete workflow runs
+        uses: Mattraks/delete-workflow-runs@v2
         with:
-          fetch-depth: 0
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
 
-      - name: Show current workflows
-        run: |
-          echo "=== Existing workflows ==="
+          retain_days: ${{ inputs.days }}
+          keep_minimum_runs: ${{ inputs.minimum_runs }}
 
-          find .github/workflows \
-            -maxdepth 1 \
-            -type f \
-            \( -name "*.yml" -o -name "*.yaml" \) \
-            -print
+          delete_workflow_pattern: ${{ inputs.workflow_pattern }}
 
-      - name: Delete other workflows
-        run: |
-          set -euo pipefail
+          delete_workflow_by_state_pattern: >-
+            ${{ inputs.workflow_state }}
 
-          KEEP_CLEANUP="cleanup-workflows.yml"
+          delete_run_by_conclusion_pattern: >-
+            ${{ 
+              inputs.conclusion == 'Unsuccessful'
+              && 'action_required,cancelled,failure,skipped'
+              || inputs.conclusion
+            }}
 
-          echo
-          echo "Keeping:"
-          echo "  $KEEP_CLEANUP"
+          check_branch_existence: >-
+            ${{ inputs.keep_existing_branches }}
 
-          echo
-          echo "Deleting every other workflow..."
-
-          find .github/workflows \
-            -maxdepth 1 \
-            -type f \
-            \( -name "*.yml" -o -name "*.yaml" \) \
-            ! -name "$KEEP_CLEANUP" \
-            -print \
-            -delete
-
-          echo
-          echo "=== Remaining workflows ==="
-
-          find .github/workflows \
-            -maxdepth 1 \
-            -type f \
-            \( -name "*.yml" -o -name "*.yaml" \) \
-            -print
-
-      - name: Commit workflow cleanup
-        run: |
-          set -euo pipefail
-
-          if git diff --quiet; then
-            echo "No workflow files needed deleting."
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add .github/workflows
-
-          git commit -m "ci: remove unused workflows"
-
-          git push
+          check_pullrequest_exist: >-
+            ${{ inputs.keep_pull_requests }}
