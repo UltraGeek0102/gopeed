@@ -287,14 +287,7 @@ jobs:
             "dist/Gopeed-v${VERSION}-ios.ipa" \
             | grep "\.appex"
 
-      - name: Upload IPA as workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Gopeed-iOS-IPA
-          path: ui/flutter/dist/*.ipa
-          if-no-files-found: error
-
-      - name: Upload IPA to matching release if present
+      - name: Publish IPA to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
@@ -304,13 +297,39 @@ jobs:
           TAG="v${VERSION}"
           IPA="ui/flutter/dist/Gopeed-v${VERSION}-ios.ipa"
 
+          test -f "$IPA"
+
+          echo "Release tag: $TAG"
+          echo "IPA:         $IPA"
+
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Uploading IPA to release $TAG"
+            echo "Release $TAG already exists."
+            echo "Replacing IPA asset..."
+
             gh release upload \
               "$TAG" \
               "$IPA" \
               --clobber
           else
-            echo "No release named $TAG exists in this fork."
-            echo "The IPA is still available as a workflow artifact."
+            echo "Creating release $TAG..."
+
+            if [[ "$VERSION" == *-* ]]; then
+              gh release create \
+                "$TAG" \
+                "$IPA" \
+                --target "$GITHUB_SHA" \
+                --title "Gopeed $TAG" \
+                --notes "Automated iOS IPA build." \
+                --prerelease
+            else
+              gh release create \
+                "$TAG" \
+                "$IPA" \
+                --target "$GITHUB_SHA" \
+                --title "Gopeed $TAG" \
+                --notes "Automated iOS IPA build."
+            fi
           fi
+
+          echo
+          echo "IPA published to GitHub Releases."
