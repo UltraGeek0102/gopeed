@@ -1,0 +1,613 @@
+name: Build Latest iOS IPA
+
+on:
+  workflow_dispatch:
+
+env:
+  UPSTREAM_REPOSITORY: "GopeedLab/gopeed"
+  GA4_MEASUREMENT_ID: ${{ secrets.GA4_MEASUREMENT_ID }}
+  GA4_API_SECRET: ${{ secrets.GA4_API_SECRET }}
+
+permissions:
+  contents: write
+
+jobs:
+  build-ios:
+    name: Build Latest iOS IPA
+    runs-on: macos-26
+
+    steps:
+      # ------------------------------------------------------------
+      # Checkout the fork first so GitHub Actions has our repository
+      # and origin points to UltraGeek0102/gopeed.
+      # ------------------------------------------------------------
+
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ------------------------------------------------------------
+      # Find the newest published upstream release.
+      #
+      # Examples:
+      #   v2.0.0-beta.3
+      #   v2.0.0-beta.4
+      #   v2.0.0
+      #
+      # No version editing is required in this workflow.
+      # ------------------------------------------------------------
+
+      - name: Resolve latest upstream release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          TAG=$(
+            gh api \
+              "repos/${UPSTREAM_REPOSITORY}/releases?per_page=20" \
+              --jq '[.[] | select(.draft == false)][0].tag_name'
+          )
+
+          test -n "$TAG"
+          test "$TAG" != "null"
+
+          VERSION="${TAG#v}"
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          echo "=== Latest upstream release ==="
+          echo "Tag:     $TAG"
+          echo "Version: $VERSION"
+
+      # ------------------------------------------------------------
+      # Fetch and checkout the exact source corresponding to that
+      # release instead of building whatever happens to be on the
+      # fork's main branch.
+      # ------------------------------------------------------------
+
+      - name: Checkout upstream release
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          git remote remove upstream 2>/dev/null || true
+
+          git remote add upstream \
+            "https://github.com/${UPSTREAM_REPOSITORY}.git"
+
+          git fetch upstream \
+            "refs/tags/${TAG}:refs/tags/${TAG}"
+
+          git checkout --detach "${TAG}"
+
+          echo
+          echo "=== Source being built ==="
+          git log -1 --oneline
+          git describe --tags --exact-match
+
+      # ------------------------------------------------------------
+      # Read Go and Flutter versions from UPSTREAM'S workflow at the
+      # exact release tag being built.
+      #
+      # This means if Beta 4 changes Flutter/Go, this workflow follows
+      # it automatically.
+      # ------------------------------------------------------------
+
+      - name: Resolve upstream toolchain versions
+        id: toolchain
+        run: |
+          set -euo pipefail
+
+          WORKFLOW=".github/workflows/test.yml"
+
+          test -f "$WORKFLOW"
+
+          python3 - "$WORKFLOW" "$GITHUB_OUTPUT" <<'PY'
+          import re
+          import sys
+
+          path = sys.argv[1]
+          output = sys.argv[2]
+
+          with open(path, "r", encoding="utf-8") as f:
+              text = f.read()
+
+          def get_version(name):
+              pattern = rf'(?m)^\s*{re.escape(name)}\s*:\s*["\']?([^"\'#\s]+)'
+              match = re.search(pattern, text)
+
+              if not match:
+                  raise SystemExit(
+                      f"ERROR: Could not find {name} in {path}"
+                  )
+
+              return match.group(1).strip()
+
+          go_version = get_version("GO_VERSION")
+          flutter_version = get_version("FLUTTER_VERSION")
+
+          with open(output, "a", encoding="utf-8") as f:
+              f.write(f"go_version={go_version}\n")
+              f.write(f"flutter_version={flutter_version}\n")
+
+          print(f"Go version:      {go_version}")
+          print(f"Flutter version: {flutter_version}")
+          PY
+
+      # ------------------------------------------------------------
+      # Generate iOS bundle versions automatically.
+      #
+      # Upstream:
+      #   v2.0.0-beta.3
+      #
+      # iOS:
+      #   CFBundleShortVersionString = 2.0.0
+      #
+      # Build number uses GitHub's monotonically increasing run
+      # number, so it never has to be edited manually.
+      # ------------------------------------------------------------
+
+      - name: Resolve iOS bundle version
+        id: ios-version
+        env:
+          SOURCE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          IOS_VERSION=$(
+            printf '%s\n' "$SOURCE_VERSION" \
+              | sed -E \
+                's/^([0-9]+\.[0-9]+\.[0-9]+).*/\1/'
+          )
+
+          if ! [[ "$IOS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid iOS marketing version: $IOS_VERSION"
+            exit 1
+          fi
+
+          IOS_BUILD="$GITHUB_RUN_NUMBER"
+
+          echo "marketing_version=$IOS_VERSION" \
+            >> "$GITHUB_OUTPUT"
+
+          echo "build_number=$IOS_BUILD" \
+            >> "$GITHUB_OUTPUT"
+
+          echo "=== iOS version ==="
+          echo "Source version:    $SOURCE_VERSION"
+          echo "Marketing version: $IOS_VERSION"
+          echo "Build number:      $IOS_BUILD"
+
+      # ------------------------------------------------------------
+      # Set up the exact Go/Flutter versions requested by upstream.
+      # ------------------------------------------------------------
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.toolchain.outputs.go_version }}
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ steps.toolchain.outputs.flutter_version }}
+
+      # ------------------------------------------------------------
+      # Confirm the release contains the permanent iOS Continued
+      # Processing + Live Activity implementation.
+      # ------------------------------------------------------------
+
+      - name: Verify permanent Live Activity target
+        run: |
+          set -euo pipefail
+
+          test -f \
+            ui/flutter/ios/GopeedLiveActivity/GopeedLiveActivityWidget.swift
+
+          test -f \
+            ui/flutter/ios/GopeedLiveActivity/Info.plist
+
+          test -f \
+            ui/flutter/ios/Runner/GopeedDownloadAttributes.swift
+
+          test -f \
+            ui/flutter/ios/Runner/GopeedLiveActivityManager.swift
+
+          test -f \
+            ui/flutter/ios/Runner/GopeedContinuedProcessingManager.swift
+
+          echo "=== Xcode targets ==="
+
+          xcodebuild \
+            -project ui/flutter/ios/Runner.xcodeproj \
+            -list
+
+          grep -q "GopeedLiveActivityExtension" \
+            ui/flutter/ios/Runner.xcodeproj/project.pbxproj
+
+      # ------------------------------------------------------------
+      # Build Go framework.
+      # ------------------------------------------------------------
+
+      - name: Build Libgopeed for iOS
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          go install \
+            golang.org/x/mobile/cmd/gomobile@latest
+
+          go get \
+            golang.org/x/mobile/bind
+
+          gomobile init
+
+          rm -rf \
+            ui/flutter/ios/Frameworks/Libgopeed.xcframework
+
+          gomobile bind \
+            -tags nosqlite \
+            -ldflags="-w -s -X github.com/GopeedLab/gopeed/pkg/base.Version=$VERSION" \
+            -o ui/flutter/ios/Frameworks/Libgopeed.xcframework \
+            -target=ios \
+            github.com/GopeedLab/gopeed/bind/mobile
+
+      # ------------------------------------------------------------
+      # Build unsigned Runner.app.
+      # ------------------------------------------------------------
+
+      - name: Build unsigned iOS app
+        env:
+          IOS_MARKETING_VERSION: ${{ steps.ios-version.outputs.marketing_version }}
+          IOS_BUILD_NUMBER: ${{ steps.ios-version.outputs.build_number }}
+        run: |
+          set -euo pipefail
+
+          cat > "$RUNNER_TEMP/gopeed-version.xcconfig" <<EOF
+          FLUTTER_BUILD_NAME = ${IOS_MARKETING_VERSION}
+          FLUTTER_BUILD_NUMBER = ${IOS_BUILD_NUMBER}
+          EOF
+
+          echo "=== Shared iOS version settings ==="
+
+          cat "$RUNNER_TEMP/gopeed-version.xcconfig"
+
+          export \
+            XCODE_XCCONFIG_FILE="$RUNNER_TEMP/gopeed-version.xcconfig"
+
+          cd ui/flutter
+
+          flutter build ios -v \
+            --no-codesign \
+            --build-name="${IOS_MARKETING_VERSION}" \
+            --build-number="${IOS_BUILD_NUMBER}" \
+            --dart-define="UPDATE_CHANNEL=iosIpa" \
+            --dart-define="GA4_MEASUREMENT_ID=${GA4_MEASUREMENT_ID}" \
+            --dart-define="GA4_API_SECRET=${GA4_API_SECRET}"
+
+      # ------------------------------------------------------------
+      # Do NOT edit repository Info.plists.
+      #
+      # Only normalize the disposable compiled bundles.
+      # ------------------------------------------------------------
+
+      - name: Normalize built iOS bundle metadata
+        env:
+          IOS_MARKETING_VERSION: ${{ steps.ios-version.outputs.marketing_version }}
+          IOS_BUILD_NUMBER: ${{ steps.ios-version.outputs.build_number }}
+        run: |
+          set -euo pipefail
+
+          APP="ui/flutter/build/ios/iphoneos/Runner.app"
+
+          SHARE="$APP/PlugIns/ShareExtension.appex"
+
+          LIVE_ACTIVITY="$APP/PlugIns/GopeedLiveActivityExtension.appex"
+
+          test -d "$APP"
+          test -d "$SHARE"
+          test -d "$LIVE_ACTIVITY"
+
+          set_plist_string() {
+            local plist="$1"
+            local key="$2"
+            local value="$3"
+
+            if /usr/libexec/PlistBuddy \
+              -c "Print :$key" \
+              "$plist" \
+              >/dev/null 2>&1; then
+
+              /usr/libexec/PlistBuddy \
+                -c "Set :$key $value" \
+                "$plist"
+            else
+              /usr/libexec/PlistBuddy \
+                -c "Add :$key string $value" \
+                "$plist"
+            fi
+          }
+
+          echo "=== Normalizing bundle versions ==="
+
+          echo \
+            "Marketing version: ${IOS_MARKETING_VERSION}"
+
+          echo \
+            "Build number:      ${IOS_BUILD_NUMBER}"
+
+          for BUNDLE in \
+            "$APP" \
+            "$SHARE" \
+            "$LIVE_ACTIVITY"
+          do
+            PLIST="$BUNDLE/Info.plist"
+
+            set_plist_string \
+              "$PLIST" \
+              "CFBundleShortVersionString" \
+              "$IOS_MARKETING_VERSION"
+
+            set_plist_string \
+              "$PLIST" \
+              "CFBundleVersion" \
+              "$IOS_BUILD_NUMBER"
+
+            plutil -lint "$PLIST"
+          done
+
+      # ------------------------------------------------------------
+      # Verify versions are identical between Runner and extensions.
+      # ------------------------------------------------------------
+
+      - name: Verify embedded extensions and versions
+        env:
+          IOS_MARKETING_VERSION: ${{ steps.ios-version.outputs.marketing_version }}
+          IOS_BUILD_NUMBER: ${{ steps.ios-version.outputs.build_number }}
+        run: |
+          set -euo pipefail
+
+          APP="ui/flutter/build/ios/iphoneos/Runner.app"
+          PLUGINS="$APP/PlugIns"
+
+          SHARE="$PLUGINS/ShareExtension.appex"
+
+          LIVE_ACTIVITY="$PLUGINS/GopeedLiveActivityExtension.appex"
+
+          test -d "$APP"
+          test -d "$SHARE"
+          test -d "$LIVE_ACTIVITY"
+
+          echo "=== Embedded extensions ==="
+
+          find "$PLUGINS" \
+            -maxdepth 1 \
+            -name "*.appex" \
+            -print
+
+          echo
+          echo "=== Bundle metadata ==="
+
+          for BUNDLE in \
+            "$APP" \
+            "$SHARE" \
+            "$LIVE_ACTIVITY"
+          do
+            PLIST="$BUNDLE/Info.plist"
+
+            IDENTIFIER=$(
+              /usr/libexec/PlistBuddy \
+                -c "Print :CFBundleIdentifier" \
+                "$PLIST"
+            )
+
+            EXECUTABLE=$(
+              /usr/libexec/PlistBuddy \
+                -c "Print :CFBundleExecutable" \
+                "$PLIST"
+            )
+
+            PACKAGE_TYPE=$(
+              /usr/libexec/PlistBuddy \
+                -c "Print :CFBundlePackageType" \
+                "$PLIST"
+            )
+
+            SHORT_VERSION=$(
+              /usr/libexec/PlistBuddy \
+                -c "Print :CFBundleShortVersionString" \
+                "$PLIST"
+            )
+
+            BUILD_VERSION=$(
+              /usr/libexec/PlistBuddy \
+                -c "Print :CFBundleVersion" \
+                "$PLIST"
+            )
+
+            echo "$BUNDLE"
+            echo "  id:         $IDENTIFIER"
+            echo "  executable: $EXECUTABLE"
+            echo "  type:       $PACKAGE_TYPE"
+            echo "  version:    $SHORT_VERSION"
+            echo "  build:      $BUILD_VERSION"
+
+            test -n "$IDENTIFIER"
+            test -n "$EXECUTABLE"
+
+            test "$SHORT_VERSION" = \
+              "$IOS_MARKETING_VERSION"
+
+            test "$BUILD_VERSION" = \
+              "$IOS_BUILD_NUMBER"
+          done
+
+          RUNNER_TYPE=$(
+            /usr/libexec/PlistBuddy \
+              -c "Print :CFBundlePackageType" \
+              "$APP/Info.plist"
+          )
+
+          SHARE_TYPE=$(
+            /usr/libexec/PlistBuddy \
+              -c "Print :CFBundlePackageType" \
+              "$SHARE/Info.plist"
+          )
+
+          LIVE_TYPE=$(
+            /usr/libexec/PlistBuddy \
+              -c "Print :CFBundlePackageType" \
+              "$LIVE_ACTIVITY/Info.plist"
+          )
+
+          test "$RUNNER_TYPE" = "APPL"
+          test "$SHARE_TYPE" = "XPC!"
+          test "$LIVE_TYPE" = "XPC!"
+
+          echo
+          echo "=== Runner Live Activity setting ==="
+
+          /usr/libexec/PlistBuddy \
+            -c "Print :NSSupportsLiveActivities" \
+            "$APP/Info.plist"
+
+          echo
+          echo "All bundle metadata checks passed."
+          echo "All app/extension versions are synchronized."
+          echo "Live Activity extension is embedded successfully."
+
+      # ------------------------------------------------------------
+      # Package unsigned IPA.
+      # ------------------------------------------------------------
+
+      - name: Package IPA
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          cd ui/flutter
+
+          rm -rf \
+            Payload \
+            dist \
+            Payload.zip
+
+          mkdir -p \
+            Payload \
+            dist
+
+          cp -R \
+            build/ios/iphoneos/Runner.app \
+            Payload/
+
+          zip -r -y -q \
+            Payload.zip \
+            Payload/Runner.app
+
+          mv \
+            Payload.zip \
+            "dist/Gopeed-v${VERSION}-ios.ipa"
+
+          echo
+          echo "=== IPA created ==="
+
+          ls -lh \
+            "dist/Gopeed-v${VERSION}-ios.ipa"
+
+          echo
+          echo "=== Extensions inside IPA ==="
+
+          unzip -l \
+            "dist/Gopeed-v${VERSION}-ios.ipa" \
+            | grep "\.appex"
+
+      # ------------------------------------------------------------
+      # Publish directly to Releases.
+      #
+      # No workflow artifact is created.
+      # ------------------------------------------------------------
+
+      - name: Publish IPA to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          IPA="ui/flutter/dist/Gopeed-v${VERSION}-ios.ipa"
+
+          test -f "$IPA"
+
+          echo "=== Publishing ==="
+          echo "Upstream tag: $TAG"
+          echo "IPA:          $IPA"
+
+          # Push the upstream release tag into this fork if it
+          # does not already exist there.
+          if git ls-remote \
+            --exit-code \
+            --tags \
+            origin \
+            "refs/tags/${TAG}" \
+            >/dev/null 2>&1
+          then
+            echo "Tag $TAG already exists in fork."
+          else
+            echo "Adding tag $TAG to fork..."
+
+            git push \
+              origin \
+              "refs/tags/${TAG}:refs/tags/${TAG}"
+          fi
+
+          # If our fork already has a release for this version,
+          # replace only the IPA asset.
+          if gh release view \
+            "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            >/dev/null 2>&1
+          then
+            echo "Release $TAG already exists."
+            echo "Replacing IPA asset..."
+
+            gh release upload \
+              "$TAG" \
+              "$IPA" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+
+          else
+            echo "Creating release $TAG..."
+
+            if [[ "$VERSION" == *-* ]]; then
+
+              gh release create \
+                "$TAG" \
+                "$IPA" \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "Gopeed $TAG" \
+                --notes "Unsigned iOS IPA built from upstream GopeedLab/gopeed release $TAG." \
+                --prerelease
+
+            else
+
+              gh release create \
+                "$TAG" \
+                "$IPA" \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "Gopeed $TAG" \
+                --notes "Unsigned iOS IPA built from upstream GopeedLab/gopeed release $TAG."
+
+            fi
+          fi
+
+          echo
+          echo "IPA published successfully."
