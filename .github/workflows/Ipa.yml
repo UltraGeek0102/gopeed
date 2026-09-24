@@ -1,4 +1,4 @@
-name: Build Latest iOS IPA
+name: Build iOS Refactor Test IPA
 
 on:
   workflow_dispatch:
@@ -28,67 +28,31 @@ jobs:
           fetch-depth: 0
 
       # ------------------------------------------------------------
-      # Find the newest published upstream release.
-      #
-      # Examples:
-      #   v2.0.0-beta.3
-      #   v2.0.0-beta.4
-      #   v2.0.0
-      #
-      # No version editing is required in this workflow.
+      # Test-build the exact branch selected in the Actions UI.
+      # This branch-only workflow change is temporary and will be
+      # removed before the refactor is proposed upstream.
       # ------------------------------------------------------------
 
-      - name: Resolve latest upstream release
+      - name: Resolve branch source version
         id: release
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          TAG=$(
-            gh api \
-              "repos/${UPSTREAM_REPOSITORY}/releases?per_page=20" \
-              --jq '[.[] | select(.draft == false)][0].tag_name'
-          )
+          RAW_VERSION=$(awk '/^version:/ { print $2; exit }' ui/flutter/pubspec.yaml)
+          SOURCE_VERSION="${RAW_VERSION%%+*}"
 
-          test -n "$TAG"
-          test "$TAG" != "null"
+          test -n "$SOURCE_VERSION"
 
-          VERSION="${TAG#v}"
+          TEST_TAG="ios-refactor-test-${GITHUB_RUN_NUMBER}"
 
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TEST_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$SOURCE_VERSION" >> "$GITHUB_OUTPUT"
 
-          echo "=== Latest upstream release ==="
-          echo "Tag:     $TAG"
-          echo "Version: $VERSION"
-
-      # ------------------------------------------------------------
-      # Fetch and checkout the exact source corresponding to that
-      # release instead of building whatever happens to be on the
-      # fork's main branch.
-      # ------------------------------------------------------------
-
-      - name: Checkout upstream release
-        env:
-          TAG: ${{ steps.release.outputs.tag }}
-        run: |
-          set -euo pipefail
-
-          git remote remove upstream 2>/dev/null || true
-
-          git remote add upstream \
-            "https://github.com/${UPSTREAM_REPOSITORY}.git"
-
-          git fetch upstream \
-            "refs/tags/${TAG}:refs/tags/${TAG}"
-
-          git checkout --detach "${TAG}"
-
-          echo
-          echo "=== Source being built ==="
-          git log -1 --oneline
-          git describe --tags --exact-match
+          echo "=== Refactor test source ==="
+          echo "Branch:  $GITHUB_REF_NAME"
+          echo "Commit:  $GITHUB_SHA"
+          echo "Version: $SOURCE_VERSION"
+          echo "Tag:     $TEST_TAG"
 
       # ------------------------------------------------------------
       # Read Go and Flutter versions from UPSTREAM'S workflow at the
@@ -534,7 +498,7 @@ jobs:
       # No workflow artifact is created.
       # ------------------------------------------------------------
 
-      - name: Publish IPA to GitHub Release
+      - name: Publish test IPA to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.release.outputs.tag }}
@@ -546,68 +510,20 @@ jobs:
 
           test -f "$IPA"
 
-          echo "=== Publishing ==="
-          echo "Upstream tag: $TAG"
-          echo "IPA:          $IPA"
+          echo "=== Publishing refactor test build ==="
+          echo "Branch: $GITHUB_REF_NAME"
+          echo "Commit: $GITHUB_SHA"
+          echo "Tag:    $TAG"
+          echo "IPA:    $IPA"
 
-          # Push the upstream release tag into this fork if it
-          # does not already exist there.
-          if git ls-remote \
-            --exit-code \
-            --tags \
-            origin \
-            "refs/tags/${TAG}" \
-            >/dev/null 2>&1
-          then
-            echo "Tag $TAG already exists in fork."
-          else
-            echo "Adding tag $TAG to fork..."
-
-            git push \
-              origin \
-              "refs/tags/${TAG}:refs/tags/${TAG}"
-          fi
-
-          # If our fork already has a release for this version,
-          # replace only the IPA asset.
-          if gh release view \
+          gh release create \
             "$TAG" \
+            "$IPA" \
             --repo "$GITHUB_REPOSITORY" \
-            >/dev/null 2>&1
-          then
-            echo "Release $TAG already exists."
-            echo "Replacing IPA asset..."
-
-            gh release upload \
-              "$TAG" \
-              "$IPA" \
-              --repo "$GITHUB_REPOSITORY" \
-              --clobber
-
-          else
-            echo "Creating release $TAG..."
-
-            if [[ "$VERSION" == *-* ]]; then
-
-              gh release create \
-                "$TAG" \
-                "$IPA" \
-                --repo "$GITHUB_REPOSITORY" \
-                --title "Gopeed $TAG" \
-                --notes "Unsigned iOS IPA built from upstream GopeedLab/gopeed release $TAG." \
-                --prerelease
-
-            else
-
-              gh release create \
-                "$TAG" \
-                "$IPA" \
-                --repo "$GITHUB_REPOSITORY" \
-                --title "Gopeed $TAG" \
-                --notes "Unsigned iOS IPA built from upstream GopeedLab/gopeed release $TAG."
-
-            fi
-          fi
+            --target "$GITHUB_SHA" \
+            --title "Gopeed iOS Refactor Test #$GITHUB_RUN_NUMBER" \
+            --notes "Temporary iOS test build for continued-processing refactor commit $GITHUB_SHA." \
+            --prerelease
 
           echo
-          echo "IPA published successfully."
+          echo "Refactor test IPA published successfully."
