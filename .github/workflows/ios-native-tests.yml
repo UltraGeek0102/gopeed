@@ -1,0 +1,94 @@
+name: iOS Native Tests
+
+on:
+  push:
+    branches:
+      - test/ios-task-event-ci
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25.4"
+  FLUTTER_VERSION: "3.41.6"
+
+jobs:
+  ios-native-tests:
+    name: RunnerTests
+    runs-on: macos-26
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Build Libgopeed for iOS
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go get golang.org/x/mobile/bind
+          gomobile init
+          gomobile bind \
+            -tags nosqlite \
+            -ldflags="-w -s" \
+            -o ui/flutter/ios/Frameworks/Libgopeed.xcframework \
+            -target=ios \
+            github.com/GopeedLab/gopeed/bind/mobile
+
+      - name: Prepare Flutter project
+        working-directory: ui/flutter
+        run: flutter pub get
+
+      - name: Install CocoaPods
+        working-directory: ui/flutter/ios
+        run: pod install
+
+      - name: Run RunnerTests
+        working-directory: ui/flutter/ios
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DEVICE_ID="$(
+            xcrun simctl list devices available -j |
+            python3 -c '
+          import json
+          import sys
+
+          devices = json.load(sys.stdin)["devices"]
+
+          for runtime, entries in devices.items():
+              if "iOS" not in runtime:
+                  continue
+
+              for device in entries:
+                  if (
+                      device.get("isAvailable", False)
+                      and device["name"].startswith("iPhone")
+                  ):
+                      print(device["udid"])
+                      raise SystemExit(0)
+
+          raise SystemExit("No available iPhone simulator found")
+          '
+          )"
+
+          echo "Using simulator: $DEVICE_ID"
+
+          xcrun simctl boot "$DEVICE_ID" || true
+          xcrun simctl bootstatus "$DEVICE_ID" -b
+
+          xcodebuild test \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -destination "platform=iOS Simulator,id=$DEVICE_ID" \
+            -only-testing:RunnerTests \
+            CODE_SIGNING_ALLOWED=NO
