@@ -91,4 +91,8 @@ jobs:
             -scheme Runner \
             -destination "platform=iOS Simulator,id=$DEVICE_ID" \
             -only-testing:RunnerTests \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            FLUTTER_BUILD_NAME=1.0.0 \
+            FLUTTER_BUILD_NUMBER=1 \
+            MARKETING_VERSION=1.0.0 \
+            CURRENT_PROJECT_VERSION=1
