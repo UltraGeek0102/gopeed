@@ -164,6 +164,11 @@
   "autoExtract": "압축 파일 자동 압축 해제",
   "archivePassword": "압축 파일 비밀번호",
   "archivePasswordHint": "비밀번호가 없으면 비워 두세요",
+  "checksumAlgorithm": "Checksum Algorithm",
+  "checksumHash": "Checksum Hash",
+  "checksumExpectedHint": "Expected hash (optional)",
+  "checksumInvalidLength": "Invalid checksum hash length for {algorithm}: expected {length} characters",
+  "checksumInvalidHex": "Invalid checksum hash: expected hexadecimal characters (0-9, a-f)",
   "deleteAfterExtract": "압축 해제 후 압축 파일 삭제",
   "extracting": "압축 해제 중",
   "extractDone": "압축 해제 완료",
@@ -315,6 +320,7 @@
   "removeExtensionConfirm": "당신은 \"{name}\"을 제거하고 싶지 않습니까?",
   "uninstall": "Uninstaller를 제거",
   "unableLoadExtensions": "확장을 로드할 수 없습니다",
+  "unableLoadExtensionDetails": "확장 프로그램 세부 정보를 불러올 수 없습니다",
   "filters": "필터링",
   "allTasks": "모든 작업",
   "searchDownloads": "다운로드 수...",
@@ -447,5 +453,6 @@
   "webMcpApiTokenHint": "API 토큰을 설정한 경우 에이전트 연결 시 인증 정보를 전달해야 합니다",
   "useMcpApiTokenTemplate": "인증 구성으로 전환",
   "mcpRequiresTcp": "API 프로토콜이 TCP일 때 에이전트 연결 안내를 사용할 수 있습니다.",
-  "emptyTaskCreateHint": "{action}을 눌러 다운로드 시작"
+  "emptyTaskCreateHint": "{action}을 눌러 다운로드 시작",
+  "emptyStateRetryHint": "{action}을 눌러 다시 시도"
 }

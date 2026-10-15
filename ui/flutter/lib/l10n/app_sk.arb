@@ -178,6 +178,11 @@
   "autoExtract": "Automaticky rozbaliť archívy",
   "archivePassword": "Heslo archívu",
   "archivePasswordHint": "Nechajte prázdne, ak nie je chránený heslom",
+  "checksumAlgorithm": "Checksum Algorithm",
+  "checksumHash": "Checksum Hash",
+  "checksumExpectedHint": "Expected hash (optional)",
+  "checksumInvalidLength": "Invalid checksum hash length for {algorithm}: expected {length} characters",
+  "checksumInvalidHex": "Invalid checksum hash: expected hexadecimal characters (0-9, a-f)",
   "deleteAfterExtract": "Po rozbalení odstrániť archívy",
   "extracting": "Rozbaľovanie",
   "extractDone": "Rozbalenie dokončené",
@@ -338,6 +343,7 @@
   "removeExtensionConfirm": "Naozaj chcete odinštalovať „{name}“?",
   "uninstall": "Odinštalovať",
   "unableLoadExtensions": "Nepodarilo sa načítať rozšírenia",
+  "unableLoadExtensionDetails": "Nepodarilo sa načítať podrobnosti rozšírenia",
   "filters": "Filtre",
   "allTasks": "Všetky úlohy",
   "searchDownloads": "Hľadať sťahovania…",
@@ -648,5 +654,6 @@
         "type": "String"
       }
     }
-  }
+  },
+  "emptyStateRetryHint": "Kliknutím na {action} skúsite znova"
 }

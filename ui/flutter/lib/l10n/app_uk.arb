@@ -164,6 +164,11 @@
   "autoExtract": "Автоматично розпаковувати архіви",
   "archivePassword": "Пароль архіву",
   "archivePasswordHint": "Залишити порожнім, якщо архів не захищений паролем",
+  "checksumAlgorithm": "Checksum Algorithm",
+  "checksumHash": "Checksum Hash",
+  "checksumExpectedHint": "Expected hash (optional)",
+  "checksumInvalidLength": "Invalid checksum hash length for {algorithm}: expected {length} characters",
+  "checksumInvalidHex": "Invalid checksum hash: expected hexadecimal characters (0-9, a-f)",
   "deleteAfterExtract": "Видалити архів після розпакування",
   "extracting": "Розпакування",
   "extractDone": "Розпакування завершено",
@@ -315,6 +320,7 @@
   "removeExtensionConfirm": "Ви впевнені, що ви хочете видалити \"{name}\"?",
   "uninstall": "Видаляє",
   "unableLoadExtensions": "Неможливо до розширення навантаження",
+  "unableLoadExtensionDetails": "Не вдалося завантажити відомості про розширення",
   "filters": "Фільтри",
   "allTasks": "Всі завдання",
   "searchDownloads": "Пошук завантажень...",
@@ -447,5 +453,6 @@
   "webMcpApiTokenHint": "Якщо налаштовано API-токен, під час підключення агента потрібно передати дані автентифікації",
   "useMcpApiTokenTemplate": "Перейти до конфігурації з автентифікацією",
   "mcpRequiresTcp": "Інструкції з підключення агентів доступні, коли протокол API — TCP.",
-  "emptyTaskCreateHint": "Натисніть {action}, щоб почати завантаження"
+  "emptyTaskCreateHint": "Натисніть {action}, щоб почати завантаження",
+  "emptyStateRetryHint": "Натисніть {action}, щоб спробувати ще раз"
 }

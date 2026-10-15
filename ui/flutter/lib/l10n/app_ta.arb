@@ -164,6 +164,11 @@
   "autoExtract": "காப்பகங்களை தானாக பிரித்தெடு",
   "archivePassword": "காப்பக கடவுச்சொல்",
   "archivePasswordHint": "கடவுச்சொல் இல்லையென்றால் காலியாக விடவும்",
+  "checksumAlgorithm": "Checksum Algorithm",
+  "checksumHash": "Checksum Hash",
+  "checksumExpectedHint": "Expected hash (optional)",
+  "checksumInvalidLength": "Invalid checksum hash length for {algorithm}: expected {length} characters",
+  "checksumInvalidHex": "Invalid checksum hash: expected hexadecimal characters (0-9, a-f)",
   "deleteAfterExtract": "பிரித்தெடுத்த பிறகு காப்பகத்தை நீக்கு",
   "extracting": "பிரித்தெடுக்கிறது",
   "extractDone": "பிரித்தெடுத்தல் முடிந்தது",
@@ -315,6 +320,7 @@
   "removeExtensionConfirm": "\"{name}\" ஐ நிச்சயமாக நிறுவல் நீக்க விரும்புகிறீர்களா?",
   "uninstall": "நீக்குக",
   "unableLoadExtensions": "நீட்டிப்புகளை ஏற்ற முடியவில்லை",
+  "unableLoadExtensionDetails": "நீட்டிப்பின் விவரங்களை ஏற்ற முடியவில்லை",
   "filters": "வடிக்கட்டிகள்",
   "allTasks": "அனைத்து பணிகளையும் நகலெடு",
   "searchDownloads": "பதிவிறக்கங்களைத் தேடுங்கள்...",
@@ -447,5 +453,6 @@
   "webMcpApiTokenHint": "API டோக்கனை அமைத்திருந்தால், முகவரை இணைக்கும்போது அங்கீகாரத் தகவலை அனுப்ப வேண்டும்",
   "useMcpApiTokenTemplate": "அங்கீகார உள்ளமைவுக்கு மாறு",
   "mcpRequiresTcp": "API நெறிமுறை TCP ஆக இருக்கும்போது முகவர் இணைப்பு வழிமுறைகள் கிடைக்கும்.",
-  "emptyTaskCreateHint": "பதிவிறக்கத்தைத் தொடங்க {action} ஐ அழுத்தவும்"
+  "emptyTaskCreateHint": "பதிவிறக்கத்தைத் தொடங்க {action} ஐ அழுத்தவும்",
+  "emptyStateRetryHint": "மீண்டும் முயற்சிக்க {action} ஐ அழுத்தவும்"
 }

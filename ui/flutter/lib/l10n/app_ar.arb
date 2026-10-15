@@ -164,6 +164,11 @@
   "autoExtract": "فك الضغط تلقائياً",
   "archivePassword": "كلمة مرور الملف المضغوط",
   "archivePasswordHint": "اتركه فارغاً إذا لم يكن محمياً بكلمة مرور",
+  "checksumAlgorithm": "Checksum Algorithm",
+  "checksumHash": "Checksum Hash",
+  "checksumExpectedHint": "Expected hash (optional)",
+  "checksumInvalidLength": "Invalid checksum hash length for {algorithm}: expected {length} characters",
+  "checksumInvalidHex": "Invalid checksum hash: expected hexadecimal characters (0-9, a-f)",
   "deleteAfterExtract": "حذف الملف المضغوط بعد فك الضغط",
   "extracting": "جاري فك الضغط",
   "extractDone": "تم فك الضغط بنجاح",
@@ -315,6 +320,7 @@
   "removeExtensionConfirm": "هل أنت متأكد أنك تريد إلغاء تثبيت \"{name}\"؟",
   "uninstall": "إلغاء التثبيت",
   "unableLoadExtensions": "غير قادر على تمديد الشحنات",
+  "unableLoadExtensionDetails": "تعذّر تحميل تفاصيل الإضافة",
   "filters": "عوامل التصفية",
   "allTasks": "جميع المهام",
   "searchDownloads": "ابحثوا عن التحميلات",
@@ -447,5 +453,6 @@
   "webMcpApiTokenHint": "إذا قمت بتكوين رمز API، فيجب تمرير معلومات المصادقة عند ربط الوكيل",
   "useMcpApiTokenTemplate": "التبديل إلى إعدادات المصادقة",
   "mcpRequiresTcp": "تتوفر إرشادات ربط الوكيل عندما يكون بروتوكول API هو TCP.",
-  "emptyTaskCreateHint": "اضغط على {action} لبدء التنزيل"
+  "emptyTaskCreateHint": "اضغط على {action} لبدء التنزيل",
+  "emptyStateRetryHint": "اضغط على {action} لإعادة المحاولة"
 }

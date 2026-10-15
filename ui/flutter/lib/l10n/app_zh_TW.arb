@@ -164,6 +164,11 @@
   "autoExtract": "自動解壓縮壓縮包",
   "archivePassword": "壓縮包密碼",
   "archivePasswordHint": "如無密碼請留空",
+  "checksumAlgorithm": "校驗和演算法",
+  "checksumHash": "校驗和",
+  "checksumExpectedHint": "預期雜湊值（可選）",
+  "checksumInvalidLength": "{algorithm} 校驗和雜湊長度無效：應為 {length} 個字元",
+  "checksumInvalidHex": "校驗和雜湊無效：應為十六進位字元（0-9，a-f）",
   "deleteAfterExtract": "解壓後刪除壓縮檔",
   "extracting": "正在解壓",
   "extractDone": "解壓完成",
@@ -315,6 +320,7 @@
   "removeExtensionConfirm": "確定要解除安裝「{name}」嗎？",
   "uninstall": "解除安裝",
   "unableLoadExtensions": "無法載入擴充套件",
+  "unableLoadExtensionDetails": "擴充功能詳情載入失敗",
   "filters": "篩選",
   "allTasks": "所有任務",
   "searchDownloads": "搜尋下載任務…",
@@ -447,5 +453,6 @@
   "webMcpApiTokenHint": "若已設定 API Token，接入 Agent 時需要傳遞認證資訊",
   "useMcpApiTokenTemplate": "切換為認證設定",
   "mcpRequiresTcp": "API 通訊協定為 TCP 時才能使用 Agent 接入指引。",
-  "emptyTaskCreateHint": "點擊{action}開始下載"
+  "emptyTaskCreateHint": "點擊{action}開始下載",
+  "emptyStateRetryHint": "點擊{action}重新載入"
 }

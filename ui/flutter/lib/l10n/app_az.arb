@@ -171,6 +171,11 @@
   "autoExtract": "Arxivləri Avtomatik Çıxar",
   "archivePassword": "Arxiv Parolu",
   "archivePasswordHint": "Parolla qorunmayıbsa boş buraxın",
+  "checksumAlgorithm": "Checksum Algorithm",
+  "checksumHash": "Checksum Hash",
+  "checksumExpectedHint": "Expected hash (optional)",
+  "checksumInvalidLength": "Invalid checksum hash length for {algorithm}: expected {length} characters",
+  "checksumInvalidHex": "Invalid checksum hash: expected hexadecimal characters (0-9, a-f)",
   "deleteAfterExtract": "Çıxarıldıqdan sonra arxivi sil",
   "extracting": "Çıxarılır",
   "extractDone": "Çıxarma tamamlandı",
@@ -329,6 +334,7 @@
   "removeExtensionConfirm": "“{name}” uzantısını sistemdən silmək istədiyinizə əminsiniz?",
   "uninstall": "Sistemdən sil",
   "unableLoadExtensions": "Uzantıları yükləmək mümkün olmadı",
+  "unableLoadExtensionDetails": "Əlavənin təfərrüatlarını yükləmək mümkün olmadı",
   "filters": "Süzgəclər",
   "allTasks": "Bütün Tapşırıqlar",
   "searchDownloads": "Endirmələri axtar…",
@@ -631,5 +637,6 @@
   "useMcpApiTokenTemplate": "Doğrulamalı konfiqurasiyaya keç",
   "webApiConfigReadOnlyHelp": "Veb versiyası API parametrlərinin onlayn dəyişdirilməsini dəstəkləmir. Server başlanğıc seçimlərini və ya konfiqurasiya faylını yeniləyin, sonra dəyişikliklərin qüvvəyə minməsi üçün xidməti yenidən başladın.",
   "mcpRequiresTcp": "Agent əlaqə təlimatları API protokolu TCP olduqda mövcuddur.",
-  "emptyTaskCreateHint": "Endirməyə başlamaq üçün {action} düyməsinə klikləyin"
+  "emptyTaskCreateHint": "Endirməyə başlamaq üçün {action} düyməsinə klikləyin",
+  "emptyStateRetryHint": "Yenidən cəhd etmək üçün {action} düyməsinə klikləyin"
 }

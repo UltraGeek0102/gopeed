@@ -164,6 +164,11 @@
   "autoExtract": "Extrair arquivos automaticamente",
   "archivePassword": "Senha do arquivo",
   "archivePasswordHint": "Deixar vazio se não estiver protegido por senha",
+  "checksumAlgorithm": "Checksum Algorithm",
+  "checksumHash": "Checksum Hash",
+  "checksumExpectedHint": "Expected hash (optional)",
+  "checksumInvalidLength": "Invalid checksum hash length for {algorithm}: expected {length} characters",
+  "checksumInvalidHex": "Invalid checksum hash: expected hexadecimal characters (0-9, a-f)",
   "deleteAfterExtract": "Excluir arquivo após extração",
   "extracting": "Extraindo",
   "extractDone": "Extração concluída",
@@ -315,6 +320,7 @@
   "removeExtensionConfirm": "Tem certeza de que deseja desinstalar “{name}”?",
   "uninstall": "Desinstalar",
   "unableLoadExtensions": "Não foi possível carregar extensões",
+  "unableLoadExtensionDetails": "Não foi possível carregar os detalhes da extensão",
   "filters": "Filtros",
   "allTasks": "Todas as Tarefas",
   "searchDownloads": "Procurar downloads...",
@@ -447,5 +453,6 @@
   "webMcpApiTokenHint": "Se configurou um token de API, é necessário fornecer as informações de autenticação ao ligar o agente",
   "useMcpApiTokenTemplate": "Mudar para a configuração autenticada",
   "mcpRequiresTcp": "As instruções de conexão de agentes estão disponíveis quando o protocolo da API é TCP.",
-  "emptyTaskCreateHint": "Clique em {action} para começar a baixar"
+  "emptyTaskCreateHint": "Clique em {action} para começar a baixar",
+  "emptyStateRetryHint": "Clique em {action} para tentar novamente"
 }
