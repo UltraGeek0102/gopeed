@@ -39,6 +39,11 @@ const (
 	stealMinChunkSize     = 512 * 1024 // Min steal size: 512KB (avoid tiny chunks)
 )
 
+// connReadBufferSize is the read buffer each connection allocates once and
+// reuses for its lifetime. 64 KiB keeps per-read overhead low on fast links;
+// at 256 connections it is 16 MiB per task.
+const connReadBufferSize = 64 * 1024
+
 var (
 	errRangeRequestIgnored  = errors.New("server ignored HTTP range request")
 	errInvalidRangeResponse = errors.New("invalid HTTP range response")
@@ -372,19 +377,11 @@ func (f *Fetcher) updateMaxConnTime(d time.Duration) {
 	}
 }
 
-func (f *Fetcher) Resolve(req *base.Request, opts *base.Options) error {
+func (f *Fetcher) Resolve(req *base.Request) error {
 	if err := base.ParseReqExtra[fhttp.ReqExtra](req); err != nil {
 		return err
 	}
 	f.meta.Req = req
-	f.meta.Opts = opts
-	if f.meta.Opts == nil {
-		f.meta.Opts = &base.Options{}
-	}
-
-	if err := f.initOptions(); err != nil {
-		return err
-	}
 
 	f.setState(stateResolving)
 
@@ -693,6 +690,9 @@ func (f *Fetcher) prepareFullRedownload() {
 
 // Options may be replaced between Resolve and Start when creating a resolved task.
 func (f *Fetcher) initOptions() error {
+	if f.meta.Opts == nil {
+		f.meta.Opts = &base.Options{}
+	}
 	opts := f.meta.Opts
 	// Parse options
 	if err := base.ParseOptExtra[fhttp.OptsExtra](opts); err != nil {
@@ -1141,7 +1141,7 @@ func (f *Fetcher) runConnection(conn *connection) {
 
 	// Use fast-fail client for quick retry during download phase
 	client := f.buildFastFailClient()
-	buf := make([]byte, 8192)
+	buf := make([]byte, connReadBufferSize)
 
 	retries := 0
 	f.connMu.Lock()
@@ -1803,7 +1803,7 @@ func (f *Fetcher) runConnectionWithResolveResp(conn *connection) {
 	conn.State = connConnecting
 	f.connMu.Unlock()
 
-	buf := make([]byte, 8192)
+	buf := make([]byte, connReadBufferSize)
 
 	// Get the resolve response
 	f.resolveRespLock.Lock()
@@ -1897,7 +1897,7 @@ func (f *Fetcher) runConnectionWithResolveResp(conn *connection) {
 func (f *Fetcher) runConnectionFallback(conn *connection) {
 	// Use fast-fail client for quick retry during download phase
 	client := f.buildFastFailClient()
-	buf := make([]byte, 8192)
+	buf := make([]byte, connReadBufferSize)
 
 	retries := 0
 	countedRetries := 0
