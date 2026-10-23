@@ -2,6 +2,7 @@ package download
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,6 +43,7 @@ const (
 	bucketTaskStats = "task_stats"
 	// protocol-level shared client state bucket
 	bucketProtocolState = "protocol_state"
+	bucketProtocolJobs  = "protocol_jobs"
 	// downloader config bucket
 	bucketConfig = "config"
 	// downloader extension bucket
@@ -99,6 +101,9 @@ type Progress struct {
 }
 
 type Downloader struct {
+	backgroundCtx       context.Context
+	cancelBackground    context.CancelFunc
+	protocolJobs        *protocolScheduler
 	tempFiles           *tempfiles.Scope
 	webviewProfilesLock sync.Mutex
 	webviewProfiles     map[string]*extensionWebViewProfile
@@ -125,8 +130,10 @@ type Downloader struct {
 	// Key: fullBaseName (e.g., "/path/archive.7z"), Value: taskID that claimed it
 	claimedExtractions sync.Map
 
-	extensions []*Extension
-	blob       *internalblob.Registry
+	extensions       []*Extension
+	extensionGitLock sync.Mutex
+	extensionGitWG   sync.WaitGroup
+	blob             *internalblob.Registry
 }
 
 func NewDownloader(cfg *DownloaderConfig) *Downloader {
@@ -135,11 +142,14 @@ func NewDownloader(cfg *DownloaderConfig) *Downloader {
 	}
 	cfg.Init()
 
+	backgroundCtx, cancelBackground := context.WithCancel(context.Background())
 	d := &Downloader{
-		cfg:          cfg,
-		fetcherCache: make(map[string]fetcher.Fetcher),
-		waitTasks:    make([]*Task, 0),
-		storage:      cfg.Storage,
+		backgroundCtx:    backgroundCtx,
+		cancelBackground: cancelBackground,
+		cfg:              cfg,
+		fetcherCache:     make(map[string]fetcher.Fetcher),
+		waitTasks:        make([]*Task, 0),
+		storage:          cfg.Storage,
 
 		lock:               &sync.Mutex{},
 		configLock:         &sync.RWMutex{},
@@ -165,7 +175,7 @@ func (d *Downloader) Setup() error {
 	d.blob = internalblob.NewRegistry("")
 
 	// setup storage
-	if err := d.storage.Setup([]string{bucketTask, bucketSave, bucketTaskStats, bucketProtocolState, bucketConfig, bucketExtension, bucketExtensionStorage}); err != nil {
+	if err := d.storage.Setup([]string{bucketTask, bucketSave, bucketTaskStats, bucketProtocolState, bucketProtocolJobs, bucketConfig, bucketExtension, bucketExtensionStorage}); err != nil {
 		return err
 	}
 	// load config from storage
@@ -181,20 +191,23 @@ func (d *Downloader) Setup() error {
 			FirstLoad: true,
 		}
 	}
-	// init default config
-	d.cfg.DownloaderStoreConfig.Init()
-	// init protocol config, if not exist, use default config
+	// Initialize the current backend configuration schema and defaults.
+	if err := d.initProtocolConfigs(); err != nil {
+		return err
+	}
+	// Attach optional protocol state stores after configuration initialization.
 	for _, fm := range d.cfg.FetchManagers {
 		protocol := fm.Name()
-		if _, ok := d.cfg.DownloaderStoreConfig.ProtocolConfig[protocol]; !ok {
-			d.cfg.DownloaderStoreConfig.ProtocolConfig[protocol] = fm.DefaultConfig()
-		}
 		if sfm, ok := fm.(fetcher.StatefulFetcherManager); ok {
 			sfm.SetStateStore(&protocolStateStore{
 				storage:  d.storage,
 				protocol: protocol,
 			})
 		}
+	}
+
+	if err := d.setupProtocolJobs(); err != nil {
+		return err
 	}
 
 	// load tasks from storage
@@ -365,6 +378,7 @@ func (d *Downloader) Setup() error {
 			time.Sleep(time.Millisecond * time.Duration(d.cfg.RefreshInterval))
 		}
 	}()
+	d.protocolJobs.start()
 	return nil
 }
 
@@ -593,7 +607,7 @@ func (d *Downloader) createDirect(req *base.Request, opts *base.Options) (taskId
 		return
 	}
 	fetcher.Meta().Req = req
-	initOpt, err := d.initOptions(opts)
+	initOpt, err := d.initOptions(opts, req.URL)
 	if err != nil {
 		return
 	}
@@ -640,7 +654,7 @@ func (d *Downloader) CreateWithOptions(rrId string, opts *base.Options) (taskId 
 	if opts == nil {
 		opts = &base.Options{}
 	}
-	opts, err = d.initOptions(opts.Clone())
+	opts, err = d.initOptions(opts.Clone(), fetcher.Meta().Req.URL)
 	if err != nil {
 		return "", err
 	}
@@ -655,6 +669,13 @@ func (d *Downloader) CreateWithOptions(rrId string, opts *base.Options) (taskId 
 	fetcher.Meta().Opts = opts
 	if res := fetcher.Meta().Res; res != nil {
 		res.CalcSize(fetcher.Meta().Opts.SelectFiles)
+	}
+	// Resolve has no creation options. Publish a submitted HTTP estimate now
+	// while preserving any size already confirmed by the response.
+	if opts.Size > 0 {
+		if err := fetcher.Patch(nil, &base.Options{Size: opts.Size}); err != nil {
+			return "", err
+		}
 	}
 	defer func() {
 		d.fetcherMapLock.Lock()
@@ -698,7 +719,7 @@ func (d *Downloader) Patch(id string, req *base.Request, opts *base.Options) err
 		}
 
 		// Call the fetcher's Patch method
-		if err := task.fetcher.Patch(req, opts); err != nil {
+		if err := task.fetcher.Patch(req, httpSizeOptions(opts, task.Protocol)); err != nil {
 			return err
 		}
 
@@ -1109,6 +1130,9 @@ func (d *Downloader) RuntimeStatus(id string) (*TaskRuntimeStatus, error) {
 		result.ExtractProgress = task.Progress.ExtractProgress
 	}
 	if task.Meta == nil || task.Meta.Res == nil {
+		if task.Meta != nil && task.Meta.Opts != nil && task.Protocol == "http" {
+			result.Total = max(0, task.Meta.Opts.Size)
+		}
 		return result, nil
 	}
 
@@ -1181,7 +1205,14 @@ func (d *Downloader) doDelete(task *Task, force bool) (err error) {
 }
 
 func (d *Downloader) Close() error {
-	d.closed.Store(true)
+	if d.closed.Swap(true) {
+		return nil
+	}
+	d.cancelBackground()
+	d.waitForExtensionGit()
+	if d.protocolJobs != nil {
+		d.protocolJobs.close()
+	}
 	d.webviewProxyLock.Lock()
 	if d.webviewProxy != nil {
 		_ = d.webviewProxy.Close()
@@ -1336,7 +1367,7 @@ func (d *Downloader) GetTasksByFilter(filter *TaskFilter) []*Task {
 func (d *Downloader) GetConfig() (*base.DownloaderStoreConfig, error) {
 	d.configLock.RLock()
 	defer d.configLock.RUnlock()
-	return d.cfg.DownloaderStoreConfig, nil
+	return util.DeepClone(d.cfg.DownloaderStoreConfig), nil
 }
 
 func (d *Downloader) PutConfig(v *base.DownloaderStoreConfig) error {
@@ -1344,12 +1375,60 @@ func (d *Downloader) PutConfig(v *base.DownloaderStoreConfig) error {
 		return errors.New("config is nil")
 	}
 	next := util.DeepClone(v)
+	changedProtocols := []string{}
 	d.configLock.Lock()
-	defer d.configLock.Unlock()
+	if d.closed.Load() {
+		d.configLock.Unlock()
+		return errors.New("downloader is closed")
+	}
+	if next.GithubMirror == nil {
+		next.GithubMirror = util.DeepClone(d.cfg.GithubMirror)
+	}
+	if err := next.GithubMirror.Validate(); err != nil {
+		d.configLock.Unlock()
+		return err
+	}
+	if next.ProtocolConfig == nil {
+		next.ProtocolConfig = map[string]any{}
+	}
+	for name := range next.ProtocolConfig {
+		if _, err := d.protocolManager(name); err != nil {
+			d.configLock.Unlock()
+			return err
+		}
+	}
+	for _, fm := range d.cfg.FetchManagers {
+		name := fm.Name()
+		value, exists := next.ProtocolConfig[name]
+		if !exists {
+			value = d.cfg.ProtocolConfig[name]
+		}
+		value, err := preserveProtocolState(value, d.cfg.ProtocolConfig[name])
+		if err == nil {
+			value, err = normalizeProtocol(fm, value)
+		}
+		if err != nil {
+			d.configLock.Unlock()
+			return err
+		}
+		next.ProtocolConfig[name] = value
+		oldJSON, _ := json.Marshal(d.cfg.ProtocolConfig[name])
+		newJSON, _ := json.Marshal(value)
+		if !bytes.Equal(oldJSON, newJSON) {
+			changedProtocols = append(changedProtocols, name)
+		}
+	}
 	if err := d.storage.Put(bucketConfig, "config", next); err != nil {
+		d.configLock.Unlock()
 		return err
 	}
 	d.cfg.DownloaderStoreConfig = next
+	d.configLock.Unlock()
+	if d.protocolJobs != nil {
+		for _, name := range changedProtocols {
+			d.protocolJobs.changed(name)
+		}
+	}
 	return nil
 }
 
@@ -1734,9 +1813,26 @@ func (d *Downloader) doCreate(f fetcher.Fetcher, opts *base.Options) (taskId str
 	return
 }
 
-func (d *Downloader) initOptions(opts *base.Options) (*base.Options, error) {
+// httpSizeOptions keeps estimates out of other protocols, including HLS URLs
+// served over HTTP. Clone before filtering because batch tasks may share options.
+func httpSizeOptions(opts *base.Options, protocol string) *base.Options {
+	if opts != nil && opts.Size != 0 && (protocol != "http" || opts.Size < 0) {
+		opts = opts.Clone()
+		opts.Size = 0
+	}
+	return opts
+}
+
+func (d *Downloader) initOptions(opts *base.Options, requestURL string) (*base.Options, error) {
 	if opts == nil {
 		opts = &base.Options{}
+	}
+	if opts.Size != 0 {
+		fm, err := d.parseFm(requestURL)
+		if err != nil {
+			return nil, err
+		}
+		opts = httpSizeOptions(opts, fm.Name())
 	}
 	if opts.SelectFiles == nil {
 		opts.SelectFiles = make([]int, 0)
