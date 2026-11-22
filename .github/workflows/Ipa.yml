@@ -765,24 +765,6 @@ jobs:
           echo "Upstream tag: $TAG"
           echo "IPA:          $IPA"
 
-          # Push the upstream release tag into this fork if it
-          # does not already exist there.
-          if git ls-remote \
-            --exit-code \
-            --tags \
-            origin \
-            "refs/tags/${TAG}" \
-            >/dev/null 2>&1
-          then
-            echo "Tag $TAG already exists in fork."
-          else
-            echo "Adding tag $TAG to fork..."
-
-            git push \
-              origin \
-              "refs/tags/${TAG}:refs/tags/${TAG}"
-          fi
-
           # If our fork already has a release for this version,
           # replace only the IPA asset.
           if gh release view \
@@ -798,30 +780,22 @@ jobs:
               "$IPA" \
               --repo "$GITHUB_REPOSITORY" \
               --clobber
-
           else
             echo "Creating release $TAG..."
 
+            PRERELEASE_FLAG=()
             if [[ "$VERSION" == *-* ]]; then
-
-              gh release create \
-                "$TAG" \
-                "$IPA" \
-                --repo "$GITHUB_REPOSITORY" \
-                --title "Gopeed $TAG" \
-                --notes "Unsigned iOS IPA built from upstream GopeedLab/gopeed release $TAG." \
-                --prerelease
-
-            else
-
-              gh release create \
-                "$TAG" \
-                "$IPA" \
-                --repo "$GITHUB_REPOSITORY" \
-                --title "Gopeed $TAG" \
-                --notes "Unsigned iOS IPA built from upstream GopeedLab/gopeed release $TAG."
-
+              PRERELEASE_FLAG+=(--prerelease)
             fi
+
+            gh release create \
+              "$TAG" \
+              "$IPA" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Gopeed $TAG" \
+              --notes "Unsigned iOS IPA built from upstream GopeedLab/gopeed release $TAG." \
+              "${PRERELEASE_FLAG[@]}"
           fi
 
           echo
