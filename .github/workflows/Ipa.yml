@@ -259,6 +259,221 @@ jobs:
             github.com/GopeedLab/gopeed/bind/mobile
 
       # ------------------------------------------------------------
+      # Inject local download notifications (completed + failed)
+      # without modifying the repository permanently.
+      # ------------------------------------------------------------
+
+      - name: Integrate iOS download notifications
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          runner_dir = Path("ui/flutter/ios/Runner")
+          pbxproj_path = Path("ui/flutter/ios/Runner.xcodeproj/project.pbxproj")
+
+          # 1. Create GopeedLocalNotificationManager.swift
+          notif_swift = """\
+          import Foundation
+          import UserNotifications
+
+          final class GopeedLocalNotificationManager: NSObject, UNUserNotificationCenterDelegate {
+              static let shared = GopeedLocalNotificationManager()
+
+              private let lock = NSLock()
+              private var notifiedEvents = Set<String>()
+
+              private override init() {
+                  super.init()
+              }
+
+              func configure() {
+                  let center = UNUserNotificationCenter.current()
+                  center.delegate = self
+                  center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+              }
+
+              func notifyDownloadCompleted(taskID: String, fileName: String) {
+                  let body = fileName.isEmpty ? "A download has finished." : fileName
+                  postNotification(
+                      taskID: taskID,
+                      kind: "done",
+                      title: "Download Complete",
+                      body: body
+                  )
+              }
+
+              func notifyDownloadFailed(taskID: String, fileName: String, error: String?) {
+                  let displayName = fileName.isEmpty ? "Download" : fileName
+                  let detail = (error ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                  let body = detail.isEmpty ? displayName : "\\(displayName) — \\(detail)"
+                  postNotification(
+                      taskID: taskID,
+                      kind: "error",
+                      title: "Download Failed",
+                      body: body
+                  )
+              }
+
+              private func postNotification(
+                  taskID: String,
+                  kind: String,
+                  title: String,
+                  body: String
+              ) {
+                  let dedupKey = "\\(taskID):\\(kind)"
+                  lock.lock()
+                  let inserted = notifiedEvents.insert(dedupKey).inserted
+                  lock.unlock()
+                  guard inserted else { return }
+
+                  let content = UNMutableNotificationContent()
+                  content.title = title
+                  content.body = body
+                  content.sound = .default
+
+                  let request = UNNotificationRequest(
+                      identifier: "gopeed.download.\\(kind).\\(taskID)",
+                      content: content,
+                      trigger: nil
+                  )
+                  UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+              }
+
+              func userNotificationCenter(
+                  _ center: UNUserNotificationCenter,
+                  willPresent notification: UNNotification,
+                  withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+              ) {
+                  completionHandler([.banner, .sound, .list])
+              }
+          }
+          """
+          (runner_dir / "GopeedLocalNotificationManager.swift").write_text(
+              "\n".join(line[10:] if line.startswith("          ") else line for line in notif_swift.splitlines()) + "\n",
+              encoding="utf-8",
+          )
+
+          # 2. Register GopeedLocalNotificationManager.swift in project.pbxproj
+          pbx = pbxproj_path.read_text(encoding="utf-8")
+          build_uuid = "A1B2C3D4E5F60718293A4B5C"
+          file_uuid = "A1B2C3D4E5F60718293A4B5D"
+          assert build_uuid not in pbx and file_uuid not in pbx, "UUID collision in project.pbxproj"
+
+          build_file_entry = f"\t\t{build_uuid} /* GopeedLocalNotificationManager.swift in Sources */ = {{isa = PBXBuildFile; fileRef = {file_uuid} /* GopeedLocalNotificationManager.swift */; }};\n"
+          file_ref_entry = f"\t\t{file_uuid} /* GopeedLocalNotificationManager.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GopeedLocalNotificationManager.swift; sourceTree = \"<group>\"; }};\n"
+
+          pbx = pbx.replace(
+              "/* Begin PBXBuildFile section */\n",
+              f"/* Begin PBXBuildFile section */\n{build_file_entry}",
+              1,
+          )
+          pbx = pbx.replace(
+              "/* Begin PBXFileReference section */\n",
+              f"/* Begin PBXFileReference section */\n{file_ref_entry}",
+              1,
+          )
+
+          group_anchor = "AppDelegate.swift */,"
+          if group_anchor not in pbx:
+              raise SystemExit("Could not find AppDelegate.swift in PBXGroup")
+          pbx = pbx.replace(
+              group_anchor,
+              f"{group_anchor}\n\t\t\t\t{file_uuid} /* GopeedLocalNotificationManager.swift */,",
+              1,
+          )
+
+          sources_anchor = "AppDelegate.swift in Sources */,"
+          if sources_anchor not in pbx:
+              raise SystemExit("Could not find AppDelegate.swift in PBXSourcesBuildPhase")
+          pbx = pbx.replace(
+              sources_anchor,
+              f"{sources_anchor}\n\t\t\t\t{build_uuid} /* GopeedLocalNotificationManager.swift in Sources */,",
+              1,
+          )
+          pbxproj_path.write_text(pbx, encoding="utf-8")
+
+          # 3. Initialize notification permissions in AppDelegate.swift
+          app_delegate_path = runner_dir / "AppDelegate.swift"
+          app_delegate = app_delegate_path.read_text(encoding="utf-8")
+          launch_return = "return super.application(application, didFinishLaunchingWithOptions: launchOptions)"
+          if launch_return not in app_delegate:
+              raise SystemExit("Could not find didFinishLaunchingWithOptions return in AppDelegate.swift")
+          app_delegate = app_delegate.replace(
+              launch_return,
+              "GopeedLocalNotificationManager.shared.configure()\n    " + launch_return,
+              1,
+          )
+          app_delegate_path.write_text(app_delegate, encoding="utf-8")
+
+          # 4. Trigger notifications on .done and .error in GopeedLiveActivityManager.swift
+          la_path = runner_dir / "GopeedLiveActivityManager.swift"
+          la_text = la_path.read_text(encoding="utf-8")
+          la_anchor = "        let taskID = event.taskID"
+          if la_anchor not in la_text:
+              raise SystemExit("Could not find 'let taskID = event.taskID' in GopeedLiveActivityManager.swift")
+          la_text = la_text.replace(
+              la_anchor,
+              la_anchor
+              + "\n\n"
+              + "        switch event.type {\n"
+              + "        case .done:\n"
+              + "            GopeedLocalNotificationManager.shared.notifyDownloadCompleted(\n"
+              + "                taskID: taskID,\n"
+              + "                fileName: event.name\n"
+              + "            )\n"
+              + "        case .error:\n"
+              + "            GopeedLocalNotificationManager.shared.notifyDownloadFailed(\n"
+              + "                taskID: taskID,\n"
+              + "                fileName: event.name,\n"
+              + "                error: event.error\n"
+              + "            )\n"
+              + "        default:\n"
+              + "            break\n"
+              + "        }",
+              1,
+          )
+          la_path.write_text(la_text, encoding="utf-8")
+
+          # 5. Trigger notifications on .done and .error in GopeedContinuedProcessingManager.swift
+          cp_path = runner_dir / "GopeedContinuedProcessingManager.swift"
+          cp_text = cp_path.read_text(encoding="utf-8")
+
+          cp_done_anchor = "        case .done:"
+          if cp_done_anchor not in cp_text:
+              raise SystemExit("Could not find 'case .done:' in GopeedContinuedProcessingManager.swift")
+          cp_text = cp_text.replace(
+              cp_done_anchor,
+              cp_done_anchor
+              + "\n"
+              + "            GopeedLocalNotificationManager.shared.notifyDownloadCompleted(\n"
+              + "                taskID: taskID,\n"
+              + "                fileName: name\n"
+              + "            )",
+              1,
+          )
+
+          cp_error_anchor = "        case .error:"
+          if cp_error_anchor not in cp_text:
+              raise SystemExit("Could not find 'case .error:' in GopeedContinuedProcessingManager.swift")
+          cp_text = cp_text.replace(
+              cp_error_anchor,
+              cp_error_anchor
+              + "\n"
+              + "            GopeedLocalNotificationManager.shared.notifyDownloadFailed(\n"
+              + "                taskID: taskID,\n"
+              + "                fileName: name,\n"
+              + "                error: event.error\n"
+              + "            )",
+              1,
+          )
+
+          cp_path.write_text(cp_text, encoding="utf-8")
+          print("Injected iOS local notification support successfully.")
+          PY
+
+      # ------------------------------------------------------------
       # Build unsigned Runner.app.
       # ------------------------------------------------------------
 
