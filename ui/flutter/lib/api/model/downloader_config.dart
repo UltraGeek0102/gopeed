@@ -111,11 +111,20 @@ class FtpConfig {
 
 @JsonSerializable()
 class HttpConfig {
+  static const defaultMaxRetries = 5;
+  static const unlimitedMaxRetries = -1;
+
   String userAgent;
   int connections;
   bool useServerCtime;
+  int maxRetries;
 
-  HttpConfig({this.userAgent = '', this.connections = 0, this.useServerCtime = false});
+  HttpConfig({
+    this.userAgent = '',
+    this.connections = 0,
+    this.useServerCtime = false,
+    this.maxRetries = HttpConfig.defaultMaxRetries,
+  });
 
   factory HttpConfig.fromJson(Map<String, dynamic> json) => _$HttpConfigFromJson(json);
 
@@ -207,6 +216,7 @@ class ExtraConfig {
   bool defaultBtClient;
   bool notifyWhenNewVersion;
   bool desktopNotification;
+  bool showDownloadProgressWindow;
   bool backgroundLocationKeepAlive;
   bool backgroundContinuedProcessing;
   WindowStateConfig windowState;
@@ -227,6 +237,7 @@ class ExtraConfig {
     this.defaultBtClient = true,
     this.notifyWhenNewVersion = true,
     this.desktopNotification = true,
+    this.showDownloadProgressWindow = true,
     this.backgroundLocationKeepAlive = false,
     this.backgroundContinuedProcessing = false,
     WindowStateConfig? windowState,

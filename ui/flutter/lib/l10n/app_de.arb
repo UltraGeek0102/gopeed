@@ -1,4 +1,8 @@
 {
+  "unableOpenDownloadProgressWindow": "Das Fenster für den Downloadfortschritt konnte nicht geöffnet werden",
+  "cancelDownload": "Download abbrechen",
+  "downloadProgressWindow": "Download-Fortschrittsfenster",
+  "downloadProgressWindowDescription": "Nur für vom Browser erfasste Downloads automatisch ein Fortschrittsfenster öffnen. Der Download läuft nach dem Schließen weiter.",
   "@@locale": "de",
   "label": "Deutsch",
   "error": "Fehler",
@@ -44,6 +48,9 @@
   "ftpTlsImplicit": "Implizites TLS (FTPS)",
   "maxRetries": "Maximale Wiederholungsversuche",
   "useServerCtime": "Serverzeit für die Dateierstellung verwenden",
+  "unlimitedRetries": "Unbegrenzte Wiederholungsversuche",
+  "maxRetriesPerConnection": "Max. Wiederholungen pro Verbindung",
+  "httpRetriesDescription": "Jede Verbindung wiederholt für sich. Wiederholungen, während eine andere Verbindung lädt, zählen nicht, und jede erfolgreiche Antwort stellt die Wiederholungen aller Verbindungen wieder her.",
   "maxRunning": "Maximale Anzahl ausgeführter Aufgaben",
   "defaultDirectDownload": "Direkten Download standardmäßig aktivieren",
   "autoStartTasks": "Unvollständige Aufgaben beim Start automatisch starten",
@@ -480,5 +487,7 @@
   "trackerSubscriptionTrackerCount": "Tracker-Anzahl",
   "trackerSubscriptionNotUpdated": "Noch nicht aktualisiert",
   "actions": "Aktionen",
-  "taskGroupDeleteImpact": "Betrifft {taskCount} Downloads und {fileCount} Dateien."
+  "taskGroupDeleteImpact": "Betrifft {taskCount} Downloads und {fileCount} Dateien.",
+  "runInBackground": "Hintergrund",
+  "downloadBackgroundHint": "Der Download läuft nach dem Schließen weiter."
 }

@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/widgets.dart' show Size;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:launch_at_startup/launch_at_startup.dart';
@@ -11,11 +10,14 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../api/api.dart' as api;
-import '../../api/model/downloader_config.dart';
+import '../../api/model/request.dart';
 import '../../core/libgopeed_boot.dart';
 import '../../core/capabilities/app_capabilities.dart';
+import '../../core/entry/app_startup_options.dart';
 import '../../core/utils/file_explorer.dart';
+import '../../core/window/app_window_bootstrap.dart';
 import '../../core/window/window_capability_transport.dart';
+import '../../features/tasks/application/download_progress_window_controller.dart';
 import '../../features/tasks/application/pending_update_task.dart';
 import '../../l10n/l10n.dart';
 import '../../shared/widgets/app_toast.dart';
@@ -135,7 +137,10 @@ class AppPlatformController extends AsyncNotifier<AppPlatformState> with WindowL
     _started = true;
     final extra = ref.read(appRuntimeControllerProvider).value!.downloaderConfig.extra;
     await AppWindowCapabilityHost.instance.start(LocalAppCapabilities.instance.registry);
-    await _restoreWindowState(extra.windowState);
+    await AppWindowBootstrap.restoreMainWindowState(
+      extra.windowState,
+      hidden: ref.read(appStartupOptionsProvider).hidden,
+    );
     windowManager.addListener(this);
     await windowManager.setPreventClose(true);
     if (Util.isMacos()) {
@@ -198,6 +203,7 @@ class AppPlatformController extends AsyncNotifier<AppPlatformState> with WindowL
   }
 
   Future<void> _initHostRpc() async {
+    final captureSession = ref.read(downloadProgressWindowControllerProvider.notifier).captureSession;
     await HostRpcService.instance.start(
       onCreate: (createTask, silent) async {
         final pendingUpdate = ref.read(pendingUpdateTaskProvider);
@@ -207,6 +213,10 @@ class AppPlatformController extends AsyncNotifier<AppPlatformState> with WindowL
               .set(PendingUpdateRequest(task: pendingUpdate, createTask: createTask));
           await _showMainWindow();
           return;
+        }
+        final request = createTask.req;
+        if (request != null) {
+          request.labels = {...?request.labels, Request.browserCaptureLabel: captureSession};
         }
         if (silent) {
           await ref.read(gopeedServiceProvider).createTask(createTask);
@@ -433,17 +443,5 @@ class AppPlatformController extends AsyncNotifier<AppPlatformState> with WindowL
   @override
   void onWindowResize() {
     _windowsResizeSave();
-  }
-
-  Future<void> _restoreWindowState(WindowStateConfig windowState) async {
-    final width = windowState.width;
-    final height = windowState.height;
-    if (width != null && height != null && width > 0 && height > 0) {
-      await windowManager.setSize(Size(width, height));
-      await windowManager.center();
-    }
-    if (windowState.isMaximized) {
-      await windowManager.maximize();
-    }
   }
 }

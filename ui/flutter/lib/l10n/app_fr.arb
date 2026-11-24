@@ -1,4 +1,8 @@
 {
+  "unableOpenDownloadProgressWindow": "Impossible d’ouvrir la fenêtre de progression du téléchargement",
+  "cancelDownload": "Annuler le téléchargement",
+  "downloadProgressWindow": "Fenêtre de progression du téléchargement",
+  "downloadProgressWindowDescription": "Ouvrir automatiquement une fenêtre de progression uniquement pour les téléchargements capturés depuis le navigateur. La fermer n’arrête pas le téléchargement.",
   "@@locale": "fr",
   "label": "Français",
   "error": "Erreur",
@@ -44,6 +48,9 @@
   "ftpTlsImplicit": "TLS implicite (FTPS)",
   "maxRetries": "Nombre maximal de tentatives",
   "useServerCtime": "Utiliser l'heure du serveur pour la création de fichier",
+  "unlimitedRetries": "Tentatives illimitées",
+  "maxRetriesPerConnection": "Nombre max. de tentatives par connexion",
+  "httpRetriesDescription": "Chaque connexion réessaie de son côté. Les tentatives faites pendant qu'une autre connexion télécharge ne comptent pas, et toute réponse réussie rétablit les tentatives de toutes les connexions.",
   "maxRunning": "Tâches en cours maximum",
   "defaultDirectDownload": "Vérifiez le téléchargement direct par défaut",
   "autoStartTasks": "Démarrer automatiquement les tâches incomplètes au lancement",
@@ -480,5 +487,7 @@
   "trackerSubscriptionTrackerCount": "Nombre de trackers",
   "trackerSubscriptionNotUpdated": "Pas encore mis à jour",
   "actions": "Actions",
-  "taskGroupDeleteImpact": "Concerne {taskCount} téléchargements et {fileCount} fichiers."
+  "taskGroupDeleteImpact": "Concerne {taskCount} téléchargements et {fileCount} fichiers.",
+  "runInBackground": "Arrière-plan",
+  "downloadBackgroundHint": "Le téléchargement continue après la fermeture de cette fenêtre."
 }

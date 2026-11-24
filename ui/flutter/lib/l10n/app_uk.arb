@@ -1,4 +1,8 @@
 {
+  "unableOpenDownloadProgressWindow": "Не вдалося відкрити вікно стану завантаження",
+  "cancelDownload": "Скасувати завантаження",
+  "downloadProgressWindow": "Вікно перебігу завантаження",
+  "downloadProgressWindowDescription": "Автоматично відкривати вікно перебігу лише для завантажень, перехоплених із браузера. Закриття вікна не зупиняє завантаження.",
   "@@locale": "uk",
   "label": "Українська",
   "error": "Помилка",
@@ -44,6 +48,9 @@
   "ftpTlsImplicit": "Неявний TLS (FTPS)",
   "maxRetries": "Макс. кількість повторів",
   "useServerCtime": "Використовувати час сервера для створення файлу",
+  "unlimitedRetries": "Необмежені повтори",
+  "maxRetriesPerConnection": "Макс. повторів на з'єднання",
+  "httpRetriesDescription": "Кожне з'єднання повторює спроби самостійно. Повтори, поки інше з'єднання завантажує, не враховуються, а будь-яка успішна відповідь відновлює повтори всіх з'єднань.",
   "maxRunning": "Макс. завдань у черзі",
   "defaultDirectDownload": "Пряме завантаження за замовчуванням",
   "autoStartTasks": "Авто-старт неповні завдання на старті",
@@ -480,5 +487,7 @@
   "trackerSubscriptionTrackerCount": "Кількість трекерів",
   "trackerSubscriptionNotUpdated": "Ще не оновлено",
   "actions": "Дії",
-  "taskGroupDeleteImpact": "Вплине на {taskCount} завантажень і {fileCount} файлів."
+  "taskGroupDeleteImpact": "Вплине на {taskCount} завантажень і {fileCount} файлів.",
+  "runInBackground": "У фоні",
+  "downloadBackgroundHint": "Завантаження триватиме після закриття вікна."
 }

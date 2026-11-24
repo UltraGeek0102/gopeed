@@ -1,4 +1,8 @@
 {
+  "unableOpenDownloadProgressWindow": "Не удалось открыть окно хода загрузки",
+  "cancelDownload": "Отменить загрузку",
+  "downloadProgressWindow": "Окно хода загрузки",
+  "downloadProgressWindowDescription": "Автоматически открывать окно прогресса только для загрузок, перехваченных из браузера. Закрытие окна не останавливает загрузку.",
   "@@locale": "ru",
   "label": "Русский",
   "error": "Ошибка",
@@ -44,6 +48,9 @@
   "ftpTlsImplicit": "Неявный TLS (FTPS)",
   "maxRetries": "Макс. число повторов",
   "useServerCtime": "Использовать время сервера для создания файла",
+  "unlimitedRetries": "Неограниченные повторы",
+  "maxRetriesPerConnection": "Макс. повторов на соединение",
+  "httpRetriesDescription": "Каждое соединение повторяет попытки самостоятельно. Повторы, пока другое соединение загружает, не учитываются, а любой успешный ответ восстанавливает повторы всех соединений.",
   "maxRunning": "Максимальное количество активных задач",
   "defaultDirectDownload": "Прямая загрузка по умолчанию",
   "autoStartTasks": "Автоматически запускать незавершённые задачи при старте",
@@ -480,5 +487,7 @@
   "trackerSubscriptionTrackerCount": "Число трекеров",
   "trackerSubscriptionNotUpdated": "Ещё не обновлено",
   "actions": "Действия",
-  "taskGroupDeleteImpact": "Затронет {taskCount} загрузок и {fileCount} файлов."
+  "taskGroupDeleteImpact": "Затронет {taskCount} загрузок и {fileCount} файлов.",
+  "runInBackground": "В фоне",
+  "downloadBackgroundHint": "Загрузка продолжится после закрытия окна."
 }
