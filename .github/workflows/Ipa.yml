@@ -788,14 +788,15 @@ jobs:
               PRERELEASE_FLAG+=(--prerelease)
             fi
 
-            gh release create \
-              "$TAG" \
-              "$IPA" \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "Gopeed $TAG" \
-              --notes "Unsigned iOS IPA built from upstream GopeedLab/gopeed release $TAG." \
-              "${PRERELEASE_FLAG[@]}"
+             gh release create \
+               "$TAG" \
+               "$IPA" \
+               --repo "$GITHUB_REPOSITORY" \
+               --target "$GITHUB_SHA" \
+               --title "Gopeed $TAG" \
+               --notes "Unsigned iOS IPA built from upstream GopeedLab/gopeed release $TAG." \
+               ${PRERELEASE_FLAG[@]+"${PRERELEASE_FLAG[@]}"}
+
           fi
 
           echo
